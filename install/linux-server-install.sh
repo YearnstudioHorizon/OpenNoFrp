@@ -1,7 +1,8 @@
 #!/bin/bash
-# OpenNoFrp Server 一键安装脚本 (Linux)
+# OpenNoFrp Server 一键安装/重装脚本 (Linux)
 # 支持从 GitHub Releases 自动检测系统架构并下载最新服务端程序，
-# 同时支持在直连超时时自动使用国内镜像加速 (https://mirror.yearnstudio.cn/)。
+# 支持在直连超时时自动使用国内镜像加速 (https://mirror.yearnstudio.cn/)。
+# 若存在旧版本，会自动平滑卸载旧程序并重新安装，且【严格保留所有配置与数据库文件】。
 #
 # 使用方式:
 #   curl -fsSL https://raw.githubusercontent.com/YearnstudioHorizon/OpenNoFrp/main/install/linux-server-install.sh | sudo bash
@@ -22,10 +23,11 @@ BINARY_DEST="$INSTALL_DIR/opennofrp-server"
 SERVICE_USER="opennofrp"
 
 log() { echo "[opennofrp-server-install] $*"; }
+warn() { echo "[opennofrp-server-install] 警告: $*" >&2; }
 err() { echo "[opennofrp-server-install] 错误: $*" >&2; }
 
 if [ "$(id -u)" -ne 0 ]; then
-  err "本安装脚本必须以 root 权限运行 (以创建专用服务用户并注册 systemd 服务)"
+  err "本安装脚本必须以 root 权限运行 (以管理专用服务用户和注册 systemd 服务)"
   exit 1
 fi
 
@@ -40,7 +42,34 @@ detect_arch() {
 ARCH="$(detect_arch)"
 LOCAL_SRC="${1:-}"
 
-# 1. 获取/下载二进制文件
+# ----------------------------------------------------------------------
+# 1. 检查是否存在旧版本，并执行平滑卸载 (保留所有配置与数据)
+# ----------------------------------------------------------------------
+IS_UPGRADE=0
+if [ -f "$BINARY_DEST" ] || [ -f "$SYSTEMD_UNIT" ]; then
+  IS_UPGRADE=1
+  log "================================================================="
+  log "⚡ 检测到本机已存在 OpenNoFrp 服务端旧版本"
+  log "正在执行平滑卸载与重新安装流程 (将严格保留您的原有配置与数据库)..."
+  log "================================================================="
+
+  # 停止正在运行的服务
+  if systemctl is-active --quiet opennofrp-server 2>/dev/null; then
+    log "正在停止旧版本服务进程..."
+    systemctl stop opennofrp-server || true
+  fi
+
+  # 卸载旧的可执行程序文件
+  if [ -f "$BINARY_DEST" ]; then
+    log "卸载旧版本二进制文件: $BINARY_DEST"
+    rm -f "$BINARY_DEST"
+  fi
+  log "旧程序已卸载，现有配置、证书和数据库完好保留！"
+fi
+
+# ----------------------------------------------------------------------
+# 2. 获取/下载最新版本的二进制程序
+# ----------------------------------------------------------------------
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -72,11 +101,13 @@ if [ -n "$LOCAL_SRC" ] && [ -f "$LOCAL_SRC" ]; then
   log "使用本地指定的服务端文件: $LOCAL_SRC"
   cp "$LOCAL_SRC" "$TMP_DIR/opennofrp-server"
 else
-  log "未指定本地文件，正在联网自动匹配 linux/$ARCH 对应版本..."
+  log "未指定本地文件，正在联网自动匹配 linux/$ARCH 对应最新版本..."
   download_from_gh "opennofrp-server-linux-$ARCH" "$TMP_DIR/opennofrp-server"
 fi
 
-# 2. 创建专用低权限服务用户
+# ----------------------------------------------------------------------
+# 3. 创建专用低权限服务账户
+# ----------------------------------------------------------------------
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   log "创建无特权专用运行账户: '$SERVICE_USER'"
   useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
@@ -84,12 +115,14 @@ else
   log "专用账户 '$SERVICE_USER' 已存在，直接复用"
 fi
 
-# 3. 安装二进制文件
+# ----------------------------------------------------------------------
+# 4. 安装全新二进制并分发客户端包
+# ----------------------------------------------------------------------
 mkdir -p "$INSTALL_DIR" "$CLIENT_BINS_DIR"
 install -m 0755 "$TMP_DIR/opennofrp-server" "$BINARY_DEST"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 
-# 顺便预下载对应架构的客户端二进制并放置到 client-bins 目录，方便内网机器接入
+# 预拉取客户端二进制文件到托管目录，加速内网客户端一键安装
 log "正在预拉取客户端二进制文件到服务器托管目录 ($CLIENT_BINS_DIR)..."
 download_from_gh "opennofrp-client-linux-$ARCH" "$CLIENT_BINS_DIR/opennofrp-client-linux-$ARCH" || true
 if [ "$ARCH" = "amd64" ]; then
@@ -100,22 +133,26 @@ fi
 chmod 0755 "$CLIENT_BINS_DIR"/* 2>/dev/null || true
 chown -R "$SERVICE_USER:$SERVICE_USER" "$CLIENT_BINS_DIR"
 
-# 4. 配置与数据持久化目录
+# ----------------------------------------------------------------------
+# 5. 配置与数据持久化目录管理 (严格保护已有数据)
+# ----------------------------------------------------------------------
 mkdir -p "$CONFIG_DIR" "$DATA_DIR"
 chmod 0750 "$CONFIG_DIR"
 chmod 0700 "$DATA_DIR"
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
 
 if [ -f "$CONFIG_FILE" ]; then
-  log "配置文件 $CONFIG_FILE 已存在，保留现有配置"
+  log "✓ 检查到已有配置文件 $CONFIG_FILE，已为您完整保留，绝不覆盖！"
 else
-  log "生成初始服务端配置文件 $CONFIG_FILE"
+  log "生成全新服务端初始配置文件 $CONFIG_FILE"
   "$BINARY_DEST" init-config -path "$CONFIG_FILE"
   chmod 0600 "$CONFIG_FILE"
 fi
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_FILE"
 
-# 5. 安装 systemd 服务
+# ----------------------------------------------------------------------
+# 6. 配置并重新启动 systemd 守护进程
+# ----------------------------------------------------------------------
 log "配置系统守护进程单元: $SYSTEMD_UNIT"
 cat > "$SYSTEMD_UNIT" <<UNIT
 [Unit]
@@ -142,7 +179,9 @@ systemctl enable --now opennofrp-server
 
 sleep 1
 
-# 6. 获取初始管理员账密与 TLS 证书指纹
+# ----------------------------------------------------------------------
+# 7. 汇总并展示结果
+# ----------------------------------------------------------------------
 PW_FILE="$DATA_DIR/opennofrp-initial-password.txt"
 PASSWORD="可在日志中查看"
 if [ -f "$PW_FILE" ]; then
@@ -151,13 +190,22 @@ fi
 
 echo ""
 echo "================================================================="
-log "🎉 OpenNoFrp 服务端安装完成并已成功启动！"
+if [ "$IS_UPGRADE" -eq 1 ]; then
+  log "🎉 OpenNoFrp 服务端已成功平滑重装/更新！原有配置与数据库均已完好保留。"
+else
+  log "🎉 OpenNoFrp 服务端安装完成并已成功启动！"
+fi
 echo "================================================================="
 echo "  Web 管理控制台:  http://$(curl -s4 ip.sb 2>/dev/null || echo "您的服务器公网IP"):8080"
-echo "  默认管理员账号:  admin"
-echo "  初始管理员密码:  $PASSWORD"
-echo "  配置文件位置:    $CONFIG_FILE"
-echo "  服务管理命令:    sudo systemctl status opennofrp-server"
+if [ "$IS_UPGRADE" -eq 1 ]; then
+  echo "  管理员账号密码:  已保留您之前设置的管理员密码"
+else
+  echo "  默认管理员账号:  admin"
+  echo "  初始管理员密码:  $PASSWORD"
+fi
+echo "  配置文件位置:    $CONFIG_FILE (已保留现有配置)"
+echo "  数据与证书目录:  $DATA_DIR (数据库与 TLS 证书指纹完好无损)"
+echo "  服务状态查看:    sudo systemctl status opennofrp-server"
 echo "  日志实时查看:    sudo journalctl -u opennofrp-server -f"
 echo "  在线一键自更新:  sudo opennofrp-server update"
 echo "================================================================="

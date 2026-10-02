@@ -513,10 +513,14 @@ download_client
 chmod +x "$CLIENT_BIN"
 
 mkdir -p /opt/opennofrp /etc/opennofrp /var/lib/opennofrp
+if systemctl is-active --quiet opennofrp-client 2>/dev/null; then
+  echo "[opennofrp] stopping running client service before upgrade..."
+  systemctl stop opennofrp-client || true
+fi
 install -m 0755 "$CLIENT_BIN" /opt/opennofrp/opennofrp-client
 
 if [ -f /etc/opennofrp/client.toml ]; then
-  echo "[opennofrp] existing /etc/opennofrp/client.toml kept"
+  echo "[opennofrp] existing /etc/opennofrp/client.toml kept (config preserved)"
 else
   cat > /etc/opennofrp/client.toml <<EOF
 [server]

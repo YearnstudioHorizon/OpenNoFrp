@@ -46,6 +46,10 @@ fi
 
 log "installing binary to $BINARY_DEST"
 mkdir -p "$INSTALL_DIR"
+if systemctl is-active --quiet opennofrp-client 2>/dev/null; then
+  log "检测到客户端服务正在运行，正在停止旧服务进行平滑升级..."
+  systemctl stop opennofrp-client || true
+fi
 install -m 0755 "$BINARY_SRC" "$BINARY_DEST"
 
 log "ensuring config directory $CONFIG_DIR exists"
@@ -53,7 +57,7 @@ mkdir -p "$CONFIG_DIR"
 chmod 0750 "$CONFIG_DIR"
 
 if [ -f "$CONFIG_FILE" ]; then
-  log "config already exists at $CONFIG_FILE, leaving it untouched"
+  log "配置文件 $CONFIG_FILE 已存在，严格保留现有配置 (不覆盖)"
 else
   log "writing starter config to $CONFIG_FILE"
   "$BINARY_DEST" init-config -path "$CONFIG_FILE"
