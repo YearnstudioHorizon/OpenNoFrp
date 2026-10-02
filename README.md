@@ -8,6 +8,26 @@ frp 的 `remotePort` 转发在多层 NAT/Docker 网络环境下，本地服务�
 
 OpenNoFrp 采用**本地 TPROXY 透明代理**方案，让本地服务**完全无需任何改造**（不要求支持 Proxy Protocol、不要求解析任何自定义协议头），`accept()`/`recvfrom()` 直接拿到的对端地址就是真实公网客户端 IP。详见 `docs/01-架构设计.md`。
 
+## 快速开始与一键安装
+
+### 1. 云服务器端 (Server) 一键部署
+在 Linux 云服务器上执行以下命令（自动检测系统架构并拉取最新版本安装，后台自动注册为 systemd 守护进程）：
+```bash
+# 官方源直接安装
+curl -fsSL https://raw.githubusercontent.com/YearnstudioHorizon/OpenNoFrp/main/install/linux-server-install.sh | sudo bash
+
+# 国内网络加速安装 (推荐)
+curl -fsSL https://mirror.yearnstudio.cn/https://raw.githubusercontent.com/YearnstudioHorizon/OpenNoFrp/main/install/linux-server-install.sh | sudo bash
+```
+> 安装完成后，终端将自动打印管理后台地址（默认 `http://<服务器公网IP>:8080`）、初始随机管理员密码与 TLS 证书指纹。
+
+### 2. 内网客户端 (Client) 一键接入
+浏览器打开云服务器后台登录，点击 **“接入新机器”**，控制台将自动生成一条内置一次性注册令牌与安全指纹的一键命令：
+```bash
+curl -fsSL "http://<服务器IP>:8080/install_client.sh?token=<TOKEN>&fingerprint=<FINGERPRINT>" | sudo bash
+```
+内网客户端无需任何手动配置，命令执行完毕即刻完成 TLS 安全通道握手并连接就绪。
+
 ## 安全与加密特性
 
 - **端到端 TLS 加密信道**：服务端与客户端之间全量握手、心跳与转发数据流均基于 TLS 1.3/1.2 加密传输，杜绝明文窃听与公网嗅探。
