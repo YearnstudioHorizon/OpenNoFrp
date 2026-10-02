@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>控制台 · OpenNoFrp</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='1' y='1' width='22' height='22' rx='6' fill='%234f8cff'/%3E%3Cpath d='M7 12h9m-4-4 4 4-4 4' stroke='%23fff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24"><rect x="1" y="1" width="22" height="22" rx="6" fill="#4f8cff"/><path d="M7 12h9m-4-4 4 4-4 4" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <a href="/">OpenNoFrp</a><span class="sub">控制台</span>
+  </div>
+  <div class="spacer"></div>
+  <nav><a href="#clients">内网机器</a><a href="#reserved">保留端口</a></nav>
+  <form method="post" action="/logout"><button class="btn btn-ghost btn-sm" type="submit">退出登录</button></form>
+</header>
+
+<main class="container">
+
+  {{if .Error}}<div class="alert alert-err">{{.Error}}</div>{{end}}
+  {{if .Notice}}<div class="alert alert-ok">{{.Notice}}</div>{{end}}
+
+  <div class="stats">
+    <div class="stat green"><div class="num">{{.OnlineCount}}</div><div class="label">在线机器</div></div>
+    <div class="stat"><div class="num">{{.ClientCount}}</div><div class="label">已注册机器</div></div>
+    <div class="stat accent"><div class="num">{{.TotalRules}}</div><div class="label">启用中的转发规则</div></div>
+  </div>
+
+  <section class="card" id="clients">
+    <h2>内网机器</h2>
+    <p class="desc">已注册接入本服务器的内网客户端，点击名称管理其转发规则。</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>名称</th><th>Client ID</th><th>状态</th><th>最近心跳</th><th>规则数</th></tr></thead>
+        <tbody>
+        {{range .Clients}}
+          <tr>
+            <td><a href="/clients/{{.ID}}">{{.Name}}</a></td>
+            <td><span class="tag-id">{{.ID}}</span></td>
+            <td>
+              {{if .Online}}<span class="badge badge-green pulse"><span class="dot"></span>在线</span>
+              {{else}}<span class="badge badge-gray"><span class="dot"></span>离线</span>{{end}}
+            </td>
+            <td>{{.LastSeen}}</td>
+            <td>{{.RuleCount}}</td>
+          </tr>
+        {{else}}
+          <tr><td class="empty" colspan="5">还没有注册任何内网机器 — 用下方的安装命令接入第一台</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>接入新机器</h2>
+    <p class="desc">生成一条一次性安装命令，在目标内网机器上执行即可完成注册（令牌只能使用一次）。</p>
+    <form method="post" action="/register-token">
+      <div class="form-grid">
+        <div class="field">
+          <label for="label">机器备注</label>
+          <input id="label" name="label" placeholder="例如：办公室 NAS">
+        </div>
+        <div class="field">
+          <label for="ttl">令牌有效期（分钟）</label>
+          <input id="ttl" name="ttl" value="60" inputmode="numeric">
+        </div>
+        <div class="field span-all" style="max-width:220px">
+          <label>&nbsp;</label>
+          <button class="btn btn-primary" type="submit">生成安装命令</button>
+        </div>
+      </div>
+    </form>
+
+    {{if .NewToken}}
+    <div style="margin-top:18px">
+      <p class="desc" style="margin-bottom:8px">一次性安装命令 — 请立即复制保存，令牌仅可使用一次：</p>
+      <div class="code-block">
+        <pre id="installcmd">{{.NewToken}}</pre>
+        <button class="btn btn-sm copy" type="button" data-copy-target="#installcmd">复制</button>
+      </div>
+    </div>
+    {{end}}
+  </section>
+
+  <section class="card" id="reserved">
+    <h2>保留端口</h2>
+    <p class="desc">保留端口永远不会被转发规则占用，用于保护 SSH、面板等关键服务端口。</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>端口</th><th>原因</th><th style="width:90px"></th></tr></thead>
+        <tbody>
+        {{range $port, $reason := .Reserved}}
+          <tr>
+            <td><span class="port">{{$port}}</span></td>
+            <td>{{$reason}}</td>
+            <td>
+              <form class="inline" method="post" action="/reserved/remove">
+                <input type="hidden" name="port" value="{{$port}}">
+                <button class="btn btn-danger btn-sm" type="submit">移除</button>
+              </form>
+            </td>
+          </tr>
+        {{else}}
+          <tr><td class="empty" colspan="3">暂无保留端口</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    <form method="post" action="/reserved/add" style="margin-top:14px">
+      <div class="form-grid" style="max-width:520px">
+        <div class="field"><label for="rport">端口</label><input id="rport" name="port" placeholder="22" inputmode="numeric"></div>
+        <div class="field"><label for="rreason">原因</label><input id="rreason" name="reason" placeholder="SSH 远程登录"></div>
+        <div class="field" style="max-width:130px"><label>&nbsp;</label><button class="btn" type="submit">添加保留</button></div>
+      </div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>修改管理员密码</h2>
+    <p class="desc">密码长度至少 6 位。</p>
+    <form method="post" action="/admin/password" style="max-width:340px">
+      <div class="field">
+        <input name="new_password" type="password" placeholder="输入新密码" autocomplete="new-password">
+      </div>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">保存密码</button></div>
+    </form>
+  </section>
+
+  <div class="foot">OpenNoFrp · 纯用户态内网穿透</div>
+</main>
+
+<script>
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('.copy');
+  if (!b) return;
+  var t = document.querySelector(b.dataset.copyTarget);
+  if (!t) return;
+  navigator.clipboard.writeText(t.innerText).then(function () {
+    var old = b.textContent;
+    b.textContent = '已复制';
+    b.classList.add('btn-primary');
+    setTimeout(function () { b.textContent = old; b.classList.remove('btn-primary'); }, 1600);
+  });
+});
+</script>
+</body>
+</html>
