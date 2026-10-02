@@ -25,9 +25,10 @@ type Config struct {
 
 // ServerConfig describes how to reach the OpenNoFrp Server control port.
 type ServerConfig struct {
-	Addr  string `toml:"addr"` // e.g. "120.26.183.14"
-	Port  int    `toml:"port"` // control port, e.g. 17000
-	Token string `toml:"token"` // one-time registration token from the panel; only needed when no credentials file exists yet
+	Addr        string `toml:"addr"`        // e.g. "120.26.183.14"
+	Port        int    `toml:"port"`        // control port, e.g. 17000
+	Token       string `toml:"token"`       // one-time registration token from the panel; only needed when no credentials file exists yet
+	Fingerprint string `toml:"fingerprint"` // 服务端 TLS 证书的 SHA-256 指纹 (Certificate Pinning)
 
 	// HeartbeatIntervalSeconds controls how often the Client sends a
 	// heartbeat on the control connection. Defaults to 10 if zero.
@@ -61,6 +62,7 @@ func CredentialsPath(configPath string) string {
 type Credentials struct {
 	ClientID     string `toml:"client_id"`
 	ClientSecret string `toml:"client_secret"`
+	Fingerprint  string `toml:"fingerprint"` // 首次信任 (TOFU) 保存的服务端证书指纹
 }
 
 // LoadCredentials reads persisted credentials, returning (nil, nil) -- not
@@ -86,7 +88,7 @@ func SaveCredentials(path string, c Credentials) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("config: mkdir for credentials: %w", err)
 	}
-	data := fmt.Sprintf("client_id = %q\nclient_secret = %q\n", c.ClientID, c.ClientSecret)
+	data := fmt.Sprintf("client_id = %q\nclient_secret = %q\nfingerprint = %q\n", c.ClientID, c.ClientSecret, c.Fingerprint)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(data), 0o600); err != nil {
 		return fmt.Errorf("config: write credentials: %w", err)
@@ -150,6 +152,10 @@ func ExampleTOML() string {
 [server]
 addr = "YOUR_SERVER_IP"
 port = 17000
+
+# 服务端 TLS 证书的 SHA-256 指纹 (Certificate Pinning)，用于防中间人攻击。
+# 一键安装脚本会自动填入此项；也可留空以启用 TOFU (首次使用自动信任)。
+# fingerprint = "SHA256:2D:4F:9A:..."
 
 # One-time registration token, copied from the panel's "add internal
 # machine" output. Only needed on the FIRST start of this machine -- after

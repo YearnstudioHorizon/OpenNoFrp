@@ -7,6 +7,7 @@ package controlconn
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -17,7 +18,9 @@ import (
 	"github.com/hashicorp/yamux"
 
 	"opennofrp/client/internal/config"
+	"opennofrp/pkg/crypto/tlsutil"
 	"opennofrp/pkg/protocol"
+	"opennofrp/pkg/version"
 )
 
 // StreamHandler is called for every new yamux stream the Server opens,
@@ -42,7 +45,8 @@ type Client struct {
 	OnCredentials func(c config.Credentials)
 	Handler       StreamHandler
 
-	seq uint64
+	seq                     uint64
+	lastObservedFingerprint string
 }
 
 // Run connects to the Server and services the connection until ctx is
@@ -82,14 +86,40 @@ func (c *Client) Run(ctx context.Context) {
 
 func (c *Client) runOnce(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", c.Cfg.Server.Addr, c.Cfg.Server.Port)
-	c.Logger.Info("connecting to server", "addr", addr)
+	c.Logger.Info("connecting to server (TLS encrypted)", "addr", addr)
+
+	configPath := os.Getenv("OPENNOFRP_CLIENT_CONFIG")
+	if configPath == "" {
+		configPath = "/etc/opennofrp/client.toml"
+	}
+	credsPath := config.CredentialsPath(configPath)
+	creds, _ := config.LoadCredentials(credsPath)
+
+	expectedFP := c.Cfg.Server.Fingerprint
+	if expectedFP == "" && creds != nil && creds.Fingerprint != "" {
+		expectedFP = creds.Fingerprint
+	}
+
+	onFirstSeen := func(fp string) error {
+		c.lastObservedFingerprint = fp
+		c.Logger.Warn("首次连接服务端，已通过自签名证书建立加密信道 (TOFU)", "fingerprint", fp)
+		return nil
+	}
+
+	tlsConfig := tlsutil.NewClientTLSConfig(expectedFP, onFirstSeen)
 
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	rawConn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("controlconn: dial %s: %w", addr, err)
 	}
-	defer conn.Close()
+	defer rawConn.Close()
+
+	tlsConn := tls.Client(rawConn, tlsConfig)
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return fmt.Errorf("controlconn: TLS handshake with %s failed: %w", addr, err)
+	}
+	conn := net.Conn(tlsConn)
 
 	if err := c.handshakeOrRegister(conn); err != nil {
 		return err
@@ -153,7 +183,7 @@ func (c *Client) handshakeOrRegister(conn net.Conn) error {
 			Type:            protocol.MsgRegisterRequest,
 			ProtocolVersion: protocol.ProtocolVersion,
 			RegisterToken:   c.Cfg.Server.Token,
-			ClientVersion:   "opennofrp-client-dev",
+			ClientVersion:   version.Version,
 			Hostname:        hostname,
 		}
 		if err := protocol.WriteJSONMessage(conn, req); err != nil {
@@ -166,7 +196,11 @@ func (c *Client) handshakeOrRegister(conn net.Conn) error {
 		if !rresp.OK {
 			return fmt.Errorf("controlconn: registration rejected: %s", rresp.Error)
 		}
-		newCreds := config.Credentials{ClientID: rresp.ClientID, ClientSecret: rresp.ClientSecret}
+		newCreds := config.Credentials{
+			ClientID:     rresp.ClientID,
+			ClientSecret: rresp.ClientSecret,
+			Fingerprint:  c.lastObservedFingerprint,
+		}
 		if err := config.SaveCredentials(credsPath, newCreds); err != nil {
 			return err
 		}
@@ -181,7 +215,7 @@ func (c *Client) handshakeOrRegister(conn net.Conn) error {
 		ProtocolVersion: protocol.ProtocolVersion,
 		ClientID:        creds.ClientID,
 		ClientSecret:    creds.ClientSecret,
-		ClientVersion:   "opennofrp-client-dev",
+		ClientVersion:   version.Version,
 	}
 	if err := protocol.WriteJSONMessage(conn, req); err != nil {
 		return fmt.Errorf("controlconn: send handshake: %w", err)

@@ -24,6 +24,18 @@
   {{if .Error}}<div class="alert alert-err">{{.Error}}</div>{{end}}
   {{if .Notice}}<div class="alert alert-ok">{{.Notice}}</div>{{end}}
 
+  <div class="card" style="margin-bottom:1rem;padding:0.75rem 1.25rem;background:#f8fafc;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;">
+    <div style="font-size:0.875rem;color:#475569;">
+      <span><strong>服务端版本:</strong> {{.Version}}</span>
+      <span style="margin:0 0.5rem;color:#cbd5e1;">|</span>
+      <span><strong>TLS 证书指纹:</strong> <code style="background:#e2e8f0;padding:2px 6px;border-radius:4px;font-size:0.8rem;">{{.Fingerprint}}</code></span>
+    </div>
+    <div>
+      <button id="btn-check-update" class="btn btn-sm" type="button">检查更新</button>
+    </div>
+  </div>
+  <div id="update-alert" style="display:none;margin-bottom:1rem;" class="alert alert-ok"></div>
+
   <div class="stats">
     <div class="stat green"><div class="num">{{.OnlineCount}}</div><div class="label">在线机器</div></div>
     <div class="stat"><div class="num">{{.ClientCount}}</div><div class="label">已注册机器</div></div>
@@ -147,6 +159,46 @@ document.addEventListener('click', function (e) {
     setTimeout(function () { b.textContent = old; b.classList.remove('btn-primary'); }, 1600);
   });
 });
+
+var btnUpdate = document.getElementById('btn-check-update');
+if (btnUpdate) {
+  btnUpdate.addEventListener('click', function() {
+    btnUpdate.disabled = true;
+    btnUpdate.textContent = '检查中...';
+    var alertBox = document.getElementById('update-alert');
+    alertBox.style.display = 'none';
+
+    fetch('/api/check-update')
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        btnUpdate.disabled = false;
+        btnUpdate.textContent = '检查更新';
+        alertBox.style.display = 'block';
+        if (!data.ok) {
+          alertBox.className = 'alert alert-err';
+          alertBox.textContent = '检查更新失败: ' + (data.error || '未知错误');
+          return;
+        }
+        var info = data.info;
+        if (info.has_update) {
+          alertBox.className = 'alert alert-ok';
+          alertBox.innerHTML = '🎉 发现新版本 <strong>' + info.latest_version + '</strong> (当前: ' + info.current_version + ')！<br>' +
+            '可前往 GitHub 查看：<a href="' + info.release_url + '" target="_blank" style="text-decoration:underline;">' + info.release_url + '</a><br>' +
+            '服务器端一键更新命令：<code>sudo opennofrp-server update</code>';
+        } else {
+          alertBox.className = 'alert alert-ok';
+          alertBox.textContent = '当前已是最新版本 (' + info.current_version + ')';
+        }
+      })
+      .catch(function(err) {
+        btnUpdate.disabled = false;
+        btnUpdate.textContent = '检查更新';
+        alertBox.style.display = 'block';
+        alertBox.className = 'alert alert-err';
+        alertBox.textContent = '请求异常: ' + err.message;
+      });
+  });
+}
 </script>
 </body>
 </html>

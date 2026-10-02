@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -29,7 +30,10 @@ import (
 
 	"github.com/hashicorp/yamux"
 
+	"opennofrp/pkg/crypto/tlsutil"
 	"opennofrp/pkg/protocol"
+	"opennofrp/pkg/updater"
+	"opennofrp/pkg/version"
 	"opennofrp/server/internal/config"
 	"opennofrp/server/internal/listener"
 	"opennofrp/server/internal/panel"
@@ -40,9 +44,21 @@ import (
 const defaultConfigPath = "/etc/opennofrp/server.toml"
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "init-config" {
-		runInitConfig()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "-v", "--version":
+			fmt.Println(version.String("opennofrp-server"))
+			return
+		case "update":
+			if err := updater.SelfUpdate(context.Background(), "opennofrp-server"); err != nil {
+				fmt.Fprintf(os.Stderr, "更新失败: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "init-config":
+			runInitConfig()
+			return
+		}
 	}
 	runServer()
 }
@@ -130,14 +146,23 @@ func runServer() {
 	// port must stay open across Server restarts.
 	s.reconcileListeners(ctx)
 
-	// Public control listener.
+	// Public control listener (wrapped in TLS with Certificate Pinning support)
+	tlsCert, fingerprint, err := tlsutil.LoadOrCreateCert(cfg.Server.TLSCertPath, cfg.Server.TLSKeyPath, []string{cfg.Server.BindAddr})
+	if err != nil {
+		logger.Error("failed to load or create TLS certificate", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("server TLS certificate ready", "fingerprint", fingerprint, "cert_path", cfg.Server.TLSCertPath)
+
 	controlAddr := fmt.Sprintf("%s:%d", cfg.Server.BindAddr, cfg.Server.ControlPort)
-	ln, err := net.Listen("tcp", controlAddr)
+	rawLn, err := net.Listen("tcp", controlAddr)
 	if err != nil {
 		logger.Error("failed to listen on control port", "addr", controlAddr, "error", err)
 		os.Exit(1)
 	}
-	logger.Info("opennofrp-server listening", "control_addr", controlAddr)
+	tlsConfig := tlsutil.NewServerTLSConfig(tlsCert)
+	ln := tls.NewListener(rawLn, tlsConfig)
+	logger.Info("opennofrp-server listening (TLS encrypted)", "control_addr", controlAddr)
 	go func() {
 		<-ctx.Done()
 		ln.Close()
@@ -146,7 +171,7 @@ func runServer() {
 
 	// Admin panel.
 	p := panel.New(st, logger, s.onAnyRuleChanged, cfg.Server.PublicBaseURL,
-		hostFromAddr(cfg.Server.BindAddr), cfg.Server.ControlPort, cfg.Server.ClientBinDir)
+		hostFromAddr(cfg.Server.BindAddr), cfg.Server.ControlPort, fingerprint, cfg.Server.ClientBinDir)
 	panelAddr := fmt.Sprintf("%s:%d", cfg.Server.PanelAddr, cfg.Server.PanelPort)
 	httpSrv := &http.Server{Addr: panelAddr, Handler: p.Handler()}
 	go func() {
@@ -301,7 +326,7 @@ func (s *server) handleControlConn(conn net.Conn) {
 	ym, err := func() (*yamux.Session, error) {
 		if err := protocol.WriteJSONMessage(conn, protocol.HandshakeResponse{
 			Type: protocol.MsgHandshakeResponse, OK: true,
-			ProtocolVersion: protocol.ProtocolVersion, ServerVersion: "opennofrp-server-dev",
+			ProtocolVersion: protocol.ProtocolVersion, ServerVersion: version.Version,
 		}); err != nil {
 			return nil, err
 		}

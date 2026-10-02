@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -22,6 +23,8 @@ import (
 	"sync"
 	"time"
 
+	"opennofrp/pkg/updater"
+	"opennofrp/pkg/version"
 	"opennofrp/server/internal/store"
 )
 
@@ -44,6 +47,8 @@ type Panel struct {
 	// will dial; rendered into the install command/script.
 	ControlHost string
 	ControlPort int
+	// Fingerprint is the SHA-256 fingerprint of the server's TLS certificate.
+	Fingerprint string
 	// ClientBinDir serves /dl/opennofrp-client-<os>-<arch>
 	ClientBinDir string
 
@@ -53,12 +58,13 @@ type Panel struct {
 	sessions map[string]time.Time
 }
 
-func New(st *store.Store, logger *slog.Logger, onRules OnRulesChanged, baseURL, controlHost string, controlPort int, clientBinDir string) *Panel {
+func New(st *store.Store, logger *slog.Logger, onRules OnRulesChanged, baseURL, controlHost string, controlPort int, fingerprint, clientBinDir string) *Panel {
 	tpl := template.Must(template.ParseFS(templateFS, "templates/*"))
 	return &Panel{
 		Store: st, Logger: logger, OnRules: onRules,
 		BaseURL: baseURL, ControlHost: controlHost, ControlPort: controlPort,
-		ClientBinDir: clientBinDir, tmpl: tpl, sessions: map[string]time.Time{},
+		Fingerprint: fingerprint, ClientBinDir: clientBinDir, tmpl: tpl,
+		sessions: map[string]time.Time{},
 	}
 }
 
@@ -90,6 +96,7 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("POST /reserved/add", auth(p.handleAddReserved))
 	mux.HandleFunc("POST /reserved/remove", auth(p.handleRemoveReserved))
 	mux.HandleFunc("POST /admin/password", auth(p.handleChangePassword))
+	mux.HandleFunc("GET /api/check-update", auth(p.handleCheckUpdate))
 	mux.HandleFunc("GET /install_client.sh", p.handleInstallScript)
 	mux.HandleFunc("GET /dl/{name}", p.handleDownload)
 	static, _ := fs.Sub(templateFS, "static")
@@ -215,6 +222,7 @@ func (p *Panel) indexData(r *http.Request) map[string]any {
 	return map[string]any{
 		"Clients": rows, "Reserved": reserved,
 		"OnlineCount": onlineCount, "ClientCount": len(rows), "TotalRules": totalRules,
+		"Fingerprint": p.Fingerprint, "Version": version.Version,
 		"Error":  friendlyMsg(r.URL.Query().Get("err")),
 		"Notice": friendlyMsg(r.URL.Query().Get("ok")),
 	}
@@ -236,10 +244,27 @@ func (p *Panel) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base := p.baseURLOf(r)
-	cmd := fmt.Sprintf("curl -fsSL \"%s/install_client.sh?token=%s\" | sudo bash", base, tok.Token)
+	cmd := fmt.Sprintf("curl -fsSL \"%s/install_client.sh?token=%s&fingerprint=%s\" | sudo bash", base, tok.Token, url.QueryEscape(p.Fingerprint))
 	data := p.indexData(r)
 	data["NewToken"] = cmd
 	p.tmpl.ExecuteTemplate(w, "index.html", data)
+}
+
+func (p *Panel) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	info, err := updater.CheckUpdate(r.Context(), version.Version)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":              false,
+			"error":           err.Error(),
+			"current_version": version.Version,
+		})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"ok":   true,
+		"info": info,
+	})
 }
 
 // ---- client page ----------------------------------------------------------
@@ -390,6 +415,10 @@ func (p *Panel) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing token", http.StatusBadRequest)
 		return
 	}
+	fp := r.URL.Query().Get("fingerprint")
+	if fp == "" {
+		fp = p.Fingerprint
+	}
 	base := p.baseURLOf(r)
 	host := p.ControlHost
 	if host == "" || host == "0.0.0.0" {
@@ -398,7 +427,7 @@ func (p *Panel) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	fmt.Fprintf(w, clientInstallScriptTemplate,
-		host, p.ControlPort, token, base)
+		host, p.ControlPort, token, fp, base)
 }
 
 func (p *Panel) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -435,6 +464,7 @@ set -euo pipefail
 SERVER_HOST="%s"
 SERVER_PORT="%d"
 TOKEN="%s"
+FINGERPRINT="%s"
 BASE_URL="%s"
 
 detect_arch() {
@@ -466,6 +496,7 @@ else
 addr = "$SERVER_HOST"
 port = $SERVER_PORT
 token = "$TOKEN"
+fingerprint = "$FINGERPRINT"
 heartbeat_interval_seconds = 10
 reconnect_min_seconds = 1
 reconnect_max_seconds = 60

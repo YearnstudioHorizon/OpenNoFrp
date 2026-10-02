@@ -47,6 +47,10 @@ type ServerConfig struct {
 	// use to reach the panel. Used when rendering the one-line install
 	// command. Defaults to http://<panel_addr-or-detected-host>:<panel_port>.
 	PublicBaseURL string `toml:"public_base_url"`
+
+	// TLSCertPath / TLSKeyPath 用于控制通道的 TLS 自签名证书与私钥
+	TLSCertPath string `toml:"tls_cert_path"`
+	TLSKeyPath  string `toml:"tls_key_path"`
 }
 
 type LogConfig struct {
@@ -87,6 +91,12 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Server.ClientBinDir == "" {
 		cfg.Server.ClientBinDir = "/opt/opennofrp/client-bins"
+	}
+	if cfg.Server.TLSCertPath == "" {
+		cfg.Server.TLSCertPath = "/var/lib/opennofrp/server.crt"
+	}
+	if cfg.Server.TLSKeyPath == "" {
+		cfg.Server.TLSKeyPath = "/var/lib/opennofrp/server.key"
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"

@@ -20,23 +20,35 @@ import (
 	"opennofrp/client/internal/rulesync"
 	"opennofrp/client/internal/tproxy"
 	"opennofrp/pkg/protocol"
+	"opennofrp/pkg/updater"
+	"opennofrp/pkg/version"
 )
 
 const defaultConfigPath = "/etc/opennofrp/client.toml"
 const defaultStateDir = "/var/lib/opennofrp"
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "envcheck" {
-		runEnvcheck()
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "init-config" {
-		runInitConfig()
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "tproxy-teardown" {
-		runTproxyTeardown()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "-v", "--version":
+			fmt.Println(version.String("opennofrp-client"))
+			return
+		case "update":
+			if err := updater.SelfUpdate(context.Background(), "opennofrp-client"); err != nil {
+				fmt.Fprintf(os.Stderr, "更新失败: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "envcheck":
+			runEnvcheck()
+			return
+		case "init-config":
+			runInitConfig()
+			return
+		case "tproxy-teardown":
+			runTproxyTeardown()
+			return
+		}
 	}
 
 	runClient()
