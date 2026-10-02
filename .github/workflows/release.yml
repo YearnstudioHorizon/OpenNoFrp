@@ -87,22 +87,18 @@ jobs:
         run: |
           cd dist
           TAG="${{ steps.vars.outputs.tag }}"
-          mkdir -p packages
-
+          # 将压缩包直接生成在 dist 目录下，避免创建 packages 子目录导致后续 sha256sum * 报错
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip -9 "packages/opennofrp-server-${TAG}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" opennofrp-server-*
+            zip -9 "opennofrp-server-${TAG}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" opennofrp-server-*
           else
-            # 将独立的二进制文件放入独立归档包
-            tar -czvf "packages/opennofrp-${TAG}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" opennofrp-*
+            tar -czvf "opennofrp-${TAG}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" opennofrp-*
           fi
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            dist/opennofrp-*
-            dist/packages/*
+          path: dist/*
 
   release:
     name: Publish GitHub Release
@@ -121,8 +117,8 @@ jobs:
       - name: Generate Checksums
         run: |
           cd release-assets
-          # 为所有生成物计算 SHA-256 校验和
-          sha256sum * > sha256sums.txt
+          # 仅针对常规文件计算 SHA-256 校验和，忽略可能存在的子目录
+          find . -maxdepth 1 -type f ! -name "sha256sums.txt" -exec sha256sum {} + | sed 's| \./| |' | sort -k 2 > sha256sums.txt
           cat sha256sums.txt
 
       - name: Create Release

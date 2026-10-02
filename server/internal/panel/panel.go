@@ -478,15 +478,42 @@ detect_arch() {
 ARCH="$(detect_arch)"
 echo "[opennofrp] downloading client for linux/$ARCH"
 TMP="$(mktemp -d)"
-curl -fsSL "$BASE_URL/dl/opennofrp-client-linux-$ARCH" -o "$TMP/opennofrp-client" || {
-  echo "[opennofrp] ERROR: could not download client binary from $BASE_URL/dl/" >&2
-  echo "[opennofrp] ask the admin to place opennofrp-client-linux-$ARCH in the server's client_bin_dir" >&2
+CLIENT_BIN="$TMP/opennofrp-client"
+
+download_client() {
+  # 1. 尝试从服务端本地 client_bin_dir 托管路径下载
+  if curl -fsSL --connect-timeout 5 -m 60 "$BASE_URL/dl/opennofrp-client-linux-$ARCH" -o "$CLIENT_BIN" 2>/dev/null; then
+    echo "[opennofrp] downloaded from server local storage ($BASE_URL/dl)"
+    return 0
+  fi
+
+  echo "[opennofrp] local server binary not found, falling back to GitHub Releases..."
+
+  GH_URL="https://github.com/YearnstudioHorizon/OpenNoFrp/releases/latest/download/opennofrp-client-linux-$ARCH"
+  MIRROR_URL="https://mirror.yearnstudio.cn/$GH_URL"
+
+  # 2. 尝试从 GitHub 官方下载 (超时限制 8 秒)
+  if curl -fsSL --connect-timeout 8 -m 120 "$GH_URL" -o "$CLIENT_BIN" 2>/dev/null; then
+    echo "[opennofrp] downloaded from GitHub Releases"
+    return 0
+  fi
+
+  # 3. GitHub 直连超时或受限，自动切换至 mirror.yearnstudio.cn 镜像加速
+  echo "[opennofrp] GitHub direct download timed out, switching to mirror accelerator (https://mirror.yearnstudio.cn/)..."
+  if curl -fsSL --connect-timeout 10 -m 120 "$MIRROR_URL" -o "$CLIENT_BIN"; then
+    echo "[opennofrp] downloaded via YearnStudio mirror accelerator"
+    return 0
+  fi
+
+  echo "[opennofrp] ERROR: could not download client binary from server, GitHub, or mirror!" >&2
   exit 1
 }
-chmod +x "$TMP/opennofrp-client"
+
+download_client
+chmod +x "$CLIENT_BIN"
 
 mkdir -p /opt/opennofrp /etc/opennofrp /var/lib/opennofrp
-install -m 0755 "$TMP/opennofrp-client" /opt/opennofrp/opennofrp-client
+install -m 0755 "$CLIENT_BIN" /opt/opennofrp/opennofrp-client
 
 if [ -f /etc/opennofrp/client.toml ]; then
   echo "[opennofrp] existing /etc/opennofrp/client.toml kept"

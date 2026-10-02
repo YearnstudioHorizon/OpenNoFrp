@@ -8,14 +8,40 @@ frp 的 `remotePort` 转发在多层 NAT/Docker 网络环境下，本地服务�
 
 OpenNoFrp 采用**本地 TPROXY 透明代理**方案，让本地服务**完全无需任何改造**（不要求支持 Proxy Protocol、不要求解析任何自定义协议头），`accept()`/`recvfrom()` 直接拿到的对端地址就是真实公网客户端 IP。详见 `docs/01-架构设计.md`。
 
-## 设计约束（务必先读）
+## 安全与加密特性
 
-本项目的拓扑中有两类角色，安全约束完全不同：
+- **端到端 TLS 加密信道**：服务端与客户端之间全量握手、心跳与转发数据流均基于 TLS 1.3/1.2 加密传输，杜绝明文窃听与公网嗅探。
+- **SHA-256 证书指纹锁定 (Certificate Pinning)**：服务端自动生成长效自签名证书并导出 SHA-256 指纹；客户端严格校验对端指纹，防止中间人劫持 (MITM)。支持 TOFU (Trust On First Use，首次使用自动信任) 及面板一键安装命令自动附带指纹。
+- **纯用户态云端**：云服务器端仅运行普通用户态网络转发，**永远不碰内核网络配置**（不修改 iptables/路由表/sysctls），避免误操作失联。
+- **受控客户端隔离**：客户端具备目标地址边界防御，严格限定本地回环转发，阻断内网跳板渗透。
 
-- **云服务器端（Server）**：风险不可控。只做纯用户态收发字节 + 转发一小段自定义元数据（原始客户端 IP:端口），**永远不碰内核网络配置**——不使用 TUN/TAP、不使用 TPROXY、不修改 iptables/nftables/路由表/内核网络参数。原因：如果云服务器只能通过 SSH 管理且无带外手段，网络配置写错会导致永久失联。
-- **本地 Client 端**：运行在你完全可控（可物理访问或至少有独立带外管理手段）的机器上，**会使用 TPROXY + `ip rule` 策略路由 + `IP_TRANSPARENT` socket**，这是实现"目标服务零改造、源 IP 保留"的必要技术手段。所有新增的 `iptables-legacy` 规则、路由表项、sysctl 参数改动都严格限定在本项目专用的命名空间内（专用表名/专用 fwmark），安装/卸载采用白名单精确增删，不做批量 flush。
+## 在线更新与国内加速镜像
 
-详细的风险分级和回滚流程见 `docs/02-风险评估与回滚方案.md`；TPROXY 技术选型、Docker 兼容性边界见 `docs/01-架构设计.md`。
+### 1. 一键检查与在线自更新 (Self-Update)
+无需手动重新下载二进制，随时随地在终端一键升级至 GitHub 最新版本：
+```bash
+# 服务端一键自更新
+sudo opennofrp-server update
+
+# 客户端一键自更新
+sudo opennofrp-client update
+```
+Web 管理面板首页也集成了“检查更新”功能，可实时获取 GitHub 最新发行公告。
+
+### 2. 国内 GitHub 加速镜像
+针对国内部分服务器或本地网络访问 GitHub 缓慢、连接超时的情况，可在任何 GitHub 链接（包括 Releases 下载文件、raw 源码等）前加上镜像加速前缀：
+```
+https://mirror.yearnstudio.cn/
+```
+示例：
+- 官方链接：`https://github.com/YearnstudioHorizon/OpenNoFrp/releases/latest/download/opennofrp-client-linux-amd64`
+- 加速链接：`https://mirror.yearnstudio.cn/https://github.com/YearnstudioHorizon/OpenNoFrp/releases/latest/download/opennofrp-client-linux-amd64`
+
+> [!NOTE]
+> **自动回退保障**：客户端的一键安装脚本及 `update` 自更新命令已内置双重保障。当直连 GitHub 官方源超时或失败时，会**自动无缝切换**至 `mirror.yearnstudio.cn` 镜像下载，无需人工干预。
+
+> [!IMPORTANT]
+> **隐私声明**：除了 Cloudflare 基础设施自动产生的基础网络日志外，我们的镜像加速代理服务**绝不收集、记录、分析或存储任何用户请求内容、传输数据或隐私信息**。
 
 ## Docker 容器兼容性
 
@@ -27,9 +53,10 @@ OpenNoFrp 采用**本地 TPROXY 透明代理**方案，让本地服务**完全�
 OpenNoFrp/
 ├── README.md              本文件
 ├── docs/                  详细设计文档、风险评估、部署手册
-├── server/                云服务器端程序源码（Go）
+├── .github/workflows/     GitHub Actions 自动化构建与多架构打包发布
+├── server/                云服务器端程序源码（Go，含 Web 管理面板、TLS 监听器）
 ├── client/                本地客户端程序源码（Go，含 TPROXY helper、netns-worker）
-├── safety/                安全验证脚本（部署前置检查、连接可用性探测、自动回滚）
+├── pkg/                   共享协议包（protocol、tlsutil、updater、version）
 └── install/               一键安装/卸载脚本（Linux）
 ```
 
@@ -42,4 +69,11 @@ OpenNoFrp/
 
 ## 状态
 
-🚧 开发阶段。架构设计与 TPROXY 方案（含 host 模式和 Docker bridge 模式的 netns-worker 方案）已在隔离 KVM 虚拟机沙箱中用真实 Go 代码做端到端验证（详见 `docs/01-架构设计.md` 第六节）。已完成：共享协议包、Client/Server 核心代码、TPROXY helper、netns-worker 正式整合进 Client 主流程（`rulesync` 按目标端口自动检测运行模式：宿主进程 / host-network 容器 / bridge 容器 netns-worker）、环境自动检测、Linux 安装/卸载脚本、Go 单体二进制 + SQLite + 内嵌 Web 管理面板（规则增删改/启停端口、注册 Client/生成一键安装命令、保留端口白名单）。待办：UDP 源 IP 保留（当前 UDP 只做普通反向代理）、容器重启自动感知、Windows 客户端、按 netns 而非按端口管理 worker 生命周期。尚未在任何真实生产服务器上部署。
+开发中已完成：
+- ✅ 端到端 TLS 通道加密与 SHA-256 证书指纹绑定 (Certificate Pinning)
+- ✅ 共享协议包、Client/Server 核心代码、TPROXY helper
+- ✅ netns-worker 宿主/bridge 容器自动感知
+- ✅ 单体 Go 二进制 + SQLite + 内嵌 Web 控制面板（带证书指纹展示与更新提示）
+- ✅ GitHub Actions 自动交叉编译多平台架构发布 (amd64 / arm64)
+- ✅ 命令行一键检查与自更新 (`opennofrp-server update` / `opennofrp-client update`)
+- ✅ 国内镜像加速自动回退与一键部署脚本优化

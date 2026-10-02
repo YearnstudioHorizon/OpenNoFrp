@@ -164,14 +164,32 @@ func SelfUpdate(ctx context.Context, componentName string) error {
 		return fmt.Errorf("在 %s 的 Release 中未找到适用于当前平台 (%s/%s) 的二进制文件: %s", latestTag, runtime.GOOS, runtime.GOARCH, targetName)
 	}
 
+	const mirrorPrefix = "https://mirror.yearnstudio.cn/"
 	fmt.Printf("[OpenNoFrp] 正在下载最新版本: %s ...\n", downloadURL)
+
+	// 首先尝试 GitHub 直连下载，失败或超时则回退到 YearnStudio 镜像加速
+	var downResp *http.Response
 	downReq, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return err
+	if err == nil {
+		downClient := &http.Client{Timeout: 15 * time.Second}
+		downResp, err = downClient.Do(downReq)
 	}
-	downResp, err := client.Do(downReq)
-	if err != nil {
-		return fmt.Errorf("下载文件失败: %w", err)
+
+	if err != nil || (downResp != nil && downResp.StatusCode != http.StatusOK) {
+		if downResp != nil {
+			downResp.Body.Close()
+		}
+		mirrorURL := mirrorPrefix + downloadURL
+		fmt.Printf("[OpenNoFrp] 直连 GitHub 下载失败或超时，正在自动切换至国内加速镜像: %s ...\n", mirrorURL)
+		mirrorReq, mErr := http.NewRequestWithContext(ctx, http.MethodGet, mirrorURL, nil)
+		if mErr != nil {
+			return fmt.Errorf("创建镜像请求失败: %w", mErr)
+		}
+		mirrorClient := &http.Client{Timeout: 60 * time.Second}
+		downResp, err = mirrorClient.Do(mirrorReq)
+		if err != nil {
+			return fmt.Errorf("通过加速镜像下载依然失败: %w", err)
+		}
 	}
 	defer downResp.Body.Close()
 
