@@ -54,8 +54,8 @@ Web 管理面板首页也集成了“检查更新”功能，可实时获取 Git
 https://mirror.yearnstudio.cn/
 ```
 示例：
-- 官方链接：`https://github.com/YearnstudioHorizon/OpenNoFrp/releases/latest/download/opennofrp-client-linux-amd64`
-- 加速链接：`https://mirror.yearnstudio.cn/https://github.com/YearnstudioHorizon/OpenNoFrp/releases/latest/download/opennofrp-client-linux-amd64`
+- 官方链接：`https://github.com/YearnstudioHorizon/OpenNoFrp/releases/download/v0.1.2/opennofrp-client-linux-amd64`
+- 加速链接：`https://mirror.yearnstudio.cn/https://github.com/YearnstudioHorizon/OpenNoFrp/releases/download/v0.1.2/opennofrp-client-linux-amd64`
 
 > [!NOTE]
 > **自动回退保障**：客户端的一键安装脚本及 `update` 自更新命令已内置双重保障。当直连 GitHub 官方源超时或失败时，会**自动无缝切换**至 `mirror.yearnstudio.cn` 镜像下载，无需人工干预。

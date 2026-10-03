@@ -133,6 +133,7 @@ func runServer() {
 		cfg:      cfg,
 		logger:   logger,
 		store:    st,
+		limiter:  newHandshakeLimiter(),
 		sessions: make(map[string]*session.Session),
 	}
 	s.listener = listener.NewManager(cfg.Server.BindAddr, logger, s.sessionFor)
@@ -194,6 +195,7 @@ type server struct {
 	logger   *slog.Logger
 	store    *store.Store
 	listener *listener.Manager
+	limiter  *handshakeLimiter
 
 	mu       sync.Mutex
 	sessions map[string]*session.Session // clientID -> live session
@@ -281,6 +283,14 @@ func (s *server) acceptControlConns(ctx context.Context, ln net.Listener) {
 func (s *server) handleControlConn(conn net.Conn) {
 	defer conn.Close()
 
+	ip := ipFromAddr(conn.RemoteAddr())
+	release, ok := s.limiter.checkAndAcquire(ip)
+	if !ok {
+		s.logger.Warn("control connection rejected: IP banned or concurrency limit reached", "remote", conn.RemoteAddr(), "ip", ip)
+		return
+	}
+	defer release()
+
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	first, err := readControlMessage(conn)
 	if err != nil {
@@ -317,11 +327,16 @@ func (s *server) handleControlConn(conn net.Conn) {
 	}
 	if err := s.validateHandshake(req); err != nil {
 		s.logger.Warn("handshake rejected", "remote", conn.RemoteAddr(), "error", err)
+		banned := s.limiter.recordFailure(ip)
+		if banned {
+			s.logger.Warn("ip banned from control port due to repeated handshake failures", "ip", ip)
+		}
 		protocol.WriteJSONMessage(conn, protocol.HandshakeResponse{
 			Type: protocol.MsgHandshakeResponse, OK: false, Error: err.Error(),
 		})
 		return
 	}
+	s.limiter.recordSuccess(ip)
 
 	ym, err := func() (*yamux.Session, error) {
 		if err := protocol.WriteJSONMessage(conn, protocol.HandshakeResponse{
@@ -402,6 +417,18 @@ func (s *server) watchControlStream(sess *session.Session, ym *yamux.Session, ct
 func (s *server) validateHandshake(req protocol.HandshakeRequest) error {
 	if req.ProtocolVersion != protocol.ProtocolVersion {
 		return fmt.Errorf("protocol version mismatch: client=%d server=%d", req.ProtocolVersion, protocol.ProtocolVersion)
+	}
+	if len(req.ClientID) == 0 || len(req.ClientSecret) == 0 {
+		return fmt.Errorf("missing client credentials")
+	}
+	// 客户端 ID 格式轻量校验（16 位 16 进制字符），防畸形探测输入与无谓计算
+	if len(req.ClientID) != 16 {
+		return fmt.Errorf("invalid client id format")
+	}
+	for _, c := range req.ClientID {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return fmt.Errorf("invalid client id format")
+		}
 	}
 	ok, err := s.store.VerifyClient(context.Background(), req.ClientID, req.ClientSecret)
 	if err != nil {
@@ -560,4 +587,103 @@ func ensureAdminSeeded(ctx context.Context, st *store.Store, cfg *config.Config,
 		logger.Info("initial admin password written", "path", pwFile)
 	}
 	return nil
+}
+
+// handshakeLimiter 负责控制端口的连接级限速、单 IP 并发控制与防爆破 CPU DoS 封禁 (MEDIUM-2 防御)
+type handshakeLimiter struct {
+	mu            sync.Mutex
+	inFlightPerIP map[string]int       // ip -> 当前并发握手数
+	failuresPerIP map[string]failInfo  // ip -> 连续失败记录
+	bannedUntil   map[string]time.Time // ip -> 封禁截止时间
+}
+
+type failInfo struct {
+	count     int
+	firstFail time.Time
+}
+
+func newHandshakeLimiter() *handshakeLimiter {
+	return &handshakeLimiter{
+		inFlightPerIP: make(map[string]int),
+		failuresPerIP: make(map[string]failInfo),
+		bannedUntil:   make(map[string]time.Time),
+	}
+}
+
+const (
+	maxInFlightPerIP = 3               // 单 IP 最大并发握手连接数
+	maxFailures      = 5               // 统计窗口内最大允许失败次数
+	failWindow       = 1 * time.Minute // 失败统计窗口
+	banDuration      = 5 * time.Minute // 触发封禁后的时长
+)
+
+func (hl *handshakeLimiter) checkAndAcquire(ip string) (func(), bool) {
+	hl.mu.Lock()
+	defer hl.mu.Unlock()
+
+	now := time.Now()
+	// 清理过期的封禁记录
+	if until, exists := hl.bannedUntil[ip]; exists {
+		if now.After(until) {
+			delete(hl.bannedUntil, ip)
+		} else {
+			return nil, false // 仍处于封禁期，立即拒绝，不进入 bcrypt
+		}
+	}
+
+	// 检查单 IP 并发上限，防止并发连接打满 CPU
+	if hl.inFlightPerIP[ip] >= maxInFlightPerIP {
+		return nil, false
+	}
+
+	hl.inFlightPerIP[ip]++
+	release := func() {
+		hl.mu.Lock()
+		hl.inFlightPerIP[ip]--
+		if hl.inFlightPerIP[ip] <= 0 {
+			delete(hl.inFlightPerIP, ip)
+		}
+		hl.mu.Unlock()
+	}
+	return release, true
+}
+
+func (hl *handshakeLimiter) recordFailure(ip string) bool {
+	hl.mu.Lock()
+	defer hl.mu.Unlock()
+
+	now := time.Now()
+	info, exists := hl.failuresPerIP[ip]
+	if !exists || now.Sub(info.firstFail) > failWindow {
+		info = failInfo{count: 1, firstFail: now}
+	} else {
+		info.count++
+	}
+
+	if info.count >= maxFailures {
+		hl.bannedUntil[ip] = now.Add(banDuration)
+		delete(hl.failuresPerIP, ip)
+		return true
+	}
+
+	hl.failuresPerIP[ip] = info
+	return false
+}
+
+func (hl *handshakeLimiter) recordSuccess(ip string) {
+	hl.mu.Lock()
+	defer hl.mu.Unlock()
+	delete(hl.failuresPerIP, ip)
+	delete(hl.bannedUntil, ip)
+}
+
+func ipFromAddr(addr net.Addr) string {
+	if addr == nil {
+		return "unknown"
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
 }

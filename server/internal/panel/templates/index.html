@@ -134,10 +134,11 @@
 
   <section class="card">
     <h2>修改管理员密码</h2>
-    <p class="desc">密码长度至少 6 位。</p>
+    <p class="desc">为了账号安全，修改密码需要输入当前密码，且新密码长度至少 6 位。</p>
     <form method="post" action="/admin/password" style="max-width:340px">
       <div class="field">
-        <input name="new_password" type="password" placeholder="输入新密码" autocomplete="new-password">
+        <input name="current_password" type="password" placeholder="输入当前旧密码" autocomplete="current-password" required style="margin-bottom:8px">
+        <input name="new_password" type="password" placeholder="输入新密码 (至少6位)" autocomplete="new-password" required>
       </div>
       <div class="form-actions"><button class="btn btn-primary" type="submit">保存密码</button></div>
     </form>

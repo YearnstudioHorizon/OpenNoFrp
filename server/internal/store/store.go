@@ -142,26 +142,58 @@ func (s *Store) CreateAdmin(ctx context.Context, username, password string) erro
 	return nil
 }
 
-// VerifyAdmin checks a username/password pair against the stored admin
-// account. Returns false (not an error) on any mismatch so callers can't
-// accidentally distinguish "wrong username" from "wrong password" via
-// error inspection (timing-safe enough for this single-admin, low-QPS
-// use case; bcrypt.CompareHashAndPassword is already constant-time for the
-// hash comparison itself).
+// dummyBcryptHash 是一个预先计算好的标准 bcrypt hash (cost 10)，
+// 用于在用户名不存在时执行等耗时的 dummy 比对，消除时序侧信道枚举漏洞 (Timing Attack)。
+const dummyBcryptHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+
+// VerifyAdmin 校验管理员账密。
+// 无论用户名正确与否，均保证执行完整的 bcrypt 计算，消除响应耗时差异（防御用户名枚举）。
 func (s *Store) VerifyAdmin(ctx context.Context, username, password string) (bool, error) {
 	var storedUsername, hash string
 	err := s.db.QueryRowContext(ctx, `SELECT username, password_hash FROM admin WHERE id = 1`).Scan(&storedUsername, &hash)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
+
+	// 若未初始化或数据库出错
+	if err != nil && err != sql.ErrNoRows {
 		return false, fmt.Errorf("store: load admin: %w", err)
 	}
-	if storedUsername != username {
+
+	// 如果用户不存在或用户名不匹配，使用 dummyHash 继续执行 bcrypt，伪装成正常核对过程
+	isMatchUser := (err == nil && storedUsername == username)
+	targetHash := hash
+	if !isMatchUser {
+		targetHash = dummyBcryptHash
+	}
+
+	// 恒定执行一次密码 Hash 校验
+	compErr := bcrypt.CompareHashAndPassword([]byte(targetHash), []byte(password))
+
+	if !isMatchUser || compErr != nil {
 		return false, nil
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
-		return false, nil
+	return true, nil
+}
+
+// SetAdminPasswordWithOld 修改管理员密码，严格要求提供原密码并在一致时才允许修改
+func (s *Store) SetAdminPasswordWithOld(ctx context.Context, oldPassword, newPassword string) (bool, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM admin WHERE id = 1`).Scan(&hash)
+	if err != nil {
+		return false, fmt.Errorf("store: load admin password: %w", err)
+	}
+
+	// 校验旧密码
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(oldPassword)); err != nil {
+		return false, nil // 旧密码错误
+	}
+
+	// 生成新密码 Hash 并更新
+	newHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return false, fmt.Errorf("store: hash new password: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE admin SET password_hash = ? WHERE id = 1`, string(newHash))
+	if err != nil {
+		return false, fmt.Errorf("store: update admin password: %w", err)
 	}
 	return true, nil
 }
@@ -178,6 +210,24 @@ func (s *Store) SetAdminPassword(ctx context.Context, newPassword string) error 
 		return fmt.Errorf("store: update admin password: %w", err)
 	}
 	return nil
+}
+
+// CheckRegisterTokenValid 检查一次性注册令牌是否有效（存在、未被消费且未过期）
+func (s *Store) CheckRegisterTokenValid(ctx context.Context, token string) (bool, error) {
+	var expiresAt, consumedAt int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT expires_at, consumed_at FROM register_tokens WHERE token = ?`, token,
+	).Scan(&expiresAt, &consumedAt)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: query register token: %w", err)
+	}
+	if consumedAt != 0 || time.Now().Unix() > expiresAt {
+		return false, nil
+	}
+	return true, nil
 }
 
 // --- Register tokens -------------------------------------------------------
