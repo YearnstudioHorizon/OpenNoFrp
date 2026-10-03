@@ -76,6 +76,29 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 # 缓存获取到的最新发布标签
 LATEST_TAG=""
 
+# safe_curl 封装高可靠网络请求：优先使用 IPv4 (-4) 规避国内部分双栈网络下 IPv6 路由黑洞导致的 SSL connection timeout
+safe_curl_get() {
+  local url="$1"
+  local timeout="${2:-10}"
+  # 优先 IPv4
+  curl -4 -s --connect-timeout 6 -m "$timeout" "$url" 2>/dev/null || curl -s --connect-timeout 6 -m "$timeout" "$url" 2>/dev/null
+}
+
+safe_curl_download() {
+  local url="$1"
+  local dest="$2"
+  local timeout="${3:-180}"
+  # 优先 IPv4 规避 Cloudflare IPv6 握手超时，并附带重试机制
+  if curl -4 -fsSL --connect-timeout 15 -m "$timeout" --retry 2 --retry-delay 1 "$url" -o "$dest" 2>/dev/null; then
+    return 0
+  fi
+  # 兼容纯 IPv6 环境的回退
+  if curl -fsSL --connect-timeout 15 -m "$timeout" "$url" -o "$dest" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
 get_latest_tag() {
   if [ -n "$LATEST_TAG" ]; then
     echo "$LATEST_TAG"
@@ -85,19 +108,22 @@ get_latest_tag() {
   local tag=""
   # 1. 优先尝试从 releases/latest 的 HTTP Location 头提取 (无 API 限额限制)
   local loc
-  loc=$(curl -sI --connect-timeout 5 -m 8 "https://github.com/$REPO/releases/latest" 2>/dev/null | grep -i "^location:" | tr -d "\r\n" || true)
+  loc=$(curl -4 -sI --connect-timeout 6 -m 8 "https://github.com/$REPO/releases/latest" 2>/dev/null | grep -i "^location:" | tr -d "\r\n" || true)
+  if [ -z "$loc" ]; then
+    loc=$(curl -sI --connect-timeout 6 -m 8 "https://github.com/$REPO/releases/latest" 2>/dev/null | grep -i "^location:" | tr -d "\r\n" || true)
+  fi
   if [ -n "$loc" ]; then
     tag=$(echo "$loc" | awk -F"/tag/" '{print $2}' | tr -d " \r\n")
   fi
 
   # 2. 次选尝试官方 API 直连
   if [ -z "$tag" ]; then
-    tag=$(curl -s --connect-timeout 5 -m 8 "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
+    tag=$(safe_curl_get "https://api.github.com/repos/$REPO/releases/latest" 8 | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
   fi
 
   # 3. 直连超时，通过国内镜像加速访问官方 API 提取 tag
   if [ -z "$tag" ]; then
-    tag=$(curl -s --connect-timeout 8 -m 10 "${MIRROR_PREFIX}https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
+    tag=$(safe_curl_get "${MIRROR_PREFIX}https://api.github.com/repos/$REPO/releases/latest" 10 | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
   fi
 
   LATEST_TAG="$tag"
@@ -118,21 +144,21 @@ download_from_gh() {
     local mirror_url="${MIRROR_PREFIX}${gh_url}"
 
     # 优先尝试 GitHub 直连 (超时限制 8 秒)
-    if curl -fsSL --connect-timeout 8 -m 120 "$gh_url" -o "$dest_path" 2>/dev/null; then
+    if safe_curl_download "$gh_url" "$dest_path" 120; then
       log "已从 GitHub Releases 官方源 ($tag) 下载成功"
       return 0
     fi
 
-    # 直连超时，切换至国内镜像加速
+    # 直连超时，切换至国内镜像加速 (优先走稳定的 IPv4 Anycast 节点)
     log "GitHub 直连超时，正在自动切换至国内加速镜像 ($MIRROR_PREFIX) ..."
-    if curl -fsSL --connect-timeout 10 -m 180 "$mirror_url" -o "$dest_path"; then
+    if safe_curl_download "$mirror_url" "$dest_path" 180; then
       log "已通过 YearnStudio 加速镜像 ($tag) 下载成功"
       return 0
     fi
   else
     # 极端未解析到 tag 时的直连兜底
     local gh_latest="https://github.com/$REPO/releases/latest/download/$asset_name"
-    if curl -fsSL --connect-timeout 8 -m 120 "$gh_latest" -o "$dest_path"; then
+    if safe_curl_download "$gh_latest" "$dest_path" 120; then
       log "已从 GitHub Releases 官方源直接下载成功"
       return 0
     fi

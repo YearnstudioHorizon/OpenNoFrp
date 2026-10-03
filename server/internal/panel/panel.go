@@ -607,18 +607,40 @@ download_client() {
   REPO="YearnstudioHorizon/OpenNoFrp"
   MIRROR_PREFIX="https://mirror.yearnstudio.cn/"
 
+  safe_curl_get() {
+    local url="$1"
+    local timeout="${2:-10}"
+    curl -4 -s --connect-timeout 6 -m "$timeout" "$url" 2>/dev/null || curl -s --connect-timeout 6 -m "$timeout" "$url" 2>/dev/null
+  }
+
+  safe_curl_download() {
+    local url="$1"
+    local dest="$2"
+    local timeout="${3:-120}"
+    if curl -4 -fsSL --connect-timeout 15 -m "$timeout" --retry 2 --retry-delay 1 "$url" -o "$dest" 2>/dev/null; then
+      return 0
+    fi
+    if curl -fsSL --connect-timeout 15 -m "$timeout" "$url" -o "$dest" 2>/dev/null; then
+      return 0
+    fi
+    return 1
+  }
+
   get_latest_tag() {
     local tag=""
     local loc
-    loc=$(curl -sI --connect-timeout 5 -m 8 "https://github.com/$REPO/releases/latest" 2>/dev/null | grep -i "^location:" | tr -d "\r\n" || true)
+    loc=$(curl -4 -sI --connect-timeout 6 -m 8 "https://github.com/$REPO/releases/latest" 2>/dev/null | grep -i "^location:" | tr -d "\r\n" || true)
+    if [ -z "$loc" ]; then
+      loc=$(curl -sI --connect-timeout 6 -m 8 "https://github.com/$REPO/releases/latest" 2>/dev/null | grep -i "^location:" | tr -d "\r\n" || true)
+    fi
     if [ -n "$loc" ]; then
       tag=$(echo "$loc" | awk -F"/tag/" '{print $2}' | tr -d " \r\n")
     fi
     if [ -z "$tag" ]; then
-      tag=$(curl -s --connect-timeout 5 -m 8 "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
+      tag=$(safe_curl_get "https://api.github.com/repos/$REPO/releases/latest" 8 | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
     fi
     if [ -z "$tag" ]; then
-      tag=$(curl -s --connect-timeout 8 -m 10 "${MIRROR_PREFIX}https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
+      tag=$(safe_curl_get "${MIRROR_PREFIX}https://api.github.com/repos/$REPO/releases/latest" 10 | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
     fi
     echo "$tag"
   }
@@ -631,20 +653,20 @@ download_client() {
     MIRROR_URL="${MIRROR_PREFIX}${GH_URL}"
 
     # 2. 尝试从 GitHub 官方下载 (超时限制 8 秒)
-    if curl -fsSL --connect-timeout 8 -m 120 "$GH_URL" -o "$CLIENT_BIN" 2>/dev/null; then
+    if safe_curl_download "$GH_URL" "$CLIENT_BIN" 120; then
       echo "[opennofrp] downloaded from GitHub Releases ($TAG)"
       return 0
     fi
 
-    # 3. GitHub 直连超时或受限，自动切换至 mirror.yearnstudio.cn 镜像加速
+    # 3. GitHub 直连超时或受限，自动切换至 mirror.yearnstudio.cn 镜像加速 (优先 IPv4 规避 Cloudflare IPv6 握手黑洞)
     echo "[opennofrp] GitHub direct download timed out, switching to mirror accelerator ($MIRROR_PREFIX)..."
-    if curl -fsSL --connect-timeout 10 -m 120 "$MIRROR_URL" -o "$CLIENT_BIN"; then
+    if safe_curl_download "$MIRROR_URL" "$CLIENT_BIN" 180; then
       echo "[opennofrp] downloaded via YearnStudio mirror accelerator ($TAG)"
       return 0
     fi
   else
     GH_LATEST="https://github.com/$REPO/releases/latest/download/$ASSET_NAME"
-    if curl -fsSL --connect-timeout 8 -m 120 "$GH_LATEST" -o "$CLIENT_BIN"; then
+    if safe_curl_download "$GH_LATEST" "$CLIENT_BIN" 120; then
       echo "[opennofrp] downloaded from GitHub Releases"
       return 0
     fi
