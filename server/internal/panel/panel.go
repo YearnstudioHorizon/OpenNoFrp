@@ -697,9 +697,9 @@ if systemctl is-active --quiet opennofrp-client 2>/dev/null; then
 fi
 install -m 0755 "$CLIENT_BIN" /opt/opennofrp/opennofrp-client
 
-if [ -f /etc/opennofrp/client.toml ]; then
-  echo "[opennofrp] existing /etc/opennofrp/client.toml kept (config preserved)"
-else
+if [ -n "$TOKEN" ]; then
+  echo "[opennofrp] applying new registration token and updating client configuration..."
+  rm -f /etc/opennofrp/client_credentials.toml
   cat > /etc/opennofrp/client.toml <<EOF
 [server]
 addr = "$SERVER_HOST"
@@ -714,6 +714,23 @@ reconnect_max_seconds = 60
 level = "info"
 EOF
   chmod 0600 /etc/opennofrp/client.toml
+elif [ ! -f /etc/opennofrp/client.toml ]; then
+  cat > /etc/opennofrp/client.toml <<EOF
+[server]
+addr = "$SERVER_HOST"
+port = $SERVER_PORT
+token = "$TOKEN"
+fingerprint = "$FINGERPRINT"
+heartbeat_interval_seconds = 10
+reconnect_min_seconds = 1
+reconnect_max_seconds = 60
+
+[log]
+level = "info"
+EOF
+  chmod 0600 /etc/opennofrp/client.toml
+else
+  echo "[opennofrp] existing /etc/opennofrp/client.toml kept (config preserved)"
 fi
 
 cat > /etc/systemd/system/opennofrp-client.service <<UNIT

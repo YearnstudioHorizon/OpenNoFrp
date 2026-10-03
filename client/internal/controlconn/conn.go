@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -225,6 +226,11 @@ func (c *Client) handshakeOrRegister(conn net.Conn) error {
 		return fmt.Errorf("controlconn: read handshake response: %w", err)
 	}
 	if !resp.OK {
+		if strings.Contains(resp.Error, "invalid client credentials") {
+			// 本地凭据已被服务端吊销或在服务端不存在，自动清理旧凭据以便支持重新注册
+			c.Logger.Warn("本地凭据已被服务端拒绝，自动清除过期凭据以支持重新注册", "path", credsPath)
+			_ = os.Remove(credsPath)
+		}
 		return fmt.Errorf("controlconn: server rejected handshake: %s", resp.Error)
 	}
 	c.Logger.Info("handshake accepted", "server_version", resp.ServerVersion)
