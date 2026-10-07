@@ -144,6 +144,10 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("GET /api/check-update", auth(p.handleCheckUpdate))
 	// /metrics 自行鉴权：面板登录会话或 Bearer MetricsToken。
 	mux.HandleFunc("GET /metrics", p.handleMetrics)
+	// REST API（Bearer API 令牌鉴权，见 api.go）与面板内的令牌管理。
+	p.registerAPI(mux)
+	mux.HandleFunc("POST /api-tokens", auth(p.handleCreateAPIToken))
+	mux.HandleFunc("POST /api-tokens/{id}/delete", auth(p.handleDeleteAPIToken))
 	mux.HandleFunc("GET /install_client.sh", p.handleInstallScript)
 	mux.HandleFunc("GET /dl/{name}", p.handleDownload)
 	static, _ := fs.Sub(templateFS, "static")
@@ -328,6 +332,22 @@ func friendlyMsg(s string) string {
 		return "HTTPS 模式无效"
 	case "redirect needs domain":
 		return "开启 HTTP→HTTPS 跳转需要绑定至少一个域名"
+	case "api token revoked":
+		return "API 令牌已吊销"
+	case "missing api token":
+		return "缺少 API 令牌，请使用 Authorization: Bearer <token>"
+	case "invalid api token":
+		return "API 令牌无效或已吊销"
+	case "read-only api token":
+		return "该 API 令牌为只读，不能执行修改操作"
+	case "client not found":
+		return "内网机器不存在"
+	case "rule not found":
+		return "规则不存在"
+	case "bad request body":
+		return "请求体无效，请提交 JSON 对象或表单"
+	case "internal error":
+		return "服务器内部错误"
 	case "bad host rewrite":
 		return "Host 改写无效，请填写域名、IP 或 域名:端口（如 internal.local:8080）"
 	case "bad req headers":
@@ -415,9 +435,10 @@ func (p *Panel) indexData(r *http.Request) map[string]any {
 		"Clients": rows, "Reserved": reserved,
 		"OnlineCount": onlineCount, "ClientCount": len(rows), "TotalRules": totalRules,
 		"Fingerprint": p.Fingerprint, "Version": version.Version,
-		"CSRF":   csrfFrom(r),
-		"Error":  friendlyMsg(r.URL.Query().Get("err")),
-		"Notice": friendlyMsg(r.URL.Query().Get("ok")),
+		"CSRF":      csrfFrom(r),
+		"APITokens": p.apiTokenRows(r.Context()),
+		"Error":     friendlyMsg(r.URL.Query().Get("err")),
+		"Notice":    friendlyMsg(r.URL.Query().Get("ok")),
 	}
 }
 

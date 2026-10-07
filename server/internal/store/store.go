@@ -127,6 +127,16 @@ CREATE TABLE IF NOT EXISTS panel_sessions (
 	created_at INTEGER NOT NULL,
 	expires_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL DEFAULT '',
+	token_hash TEXT NOT NULL UNIQUE,
+	prefix TEXT NOT NULL DEFAULT '',
+	read_only INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	last_used_at INTEGER NOT NULL DEFAULT 0
+);
 `
 	_, err := s.db.Exec(schema)
 	if err != nil {
@@ -417,6 +427,89 @@ func (s *Store) PurgeExpiredPanelSessions(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM panel_sessions WHERE expires_at < ?`, time.Now().Unix())
 	if err != nil {
 		return fmt.Errorf("store: purge panel sessions: %w", err)
+	}
+	return nil
+}
+
+// ---- REST API 令牌 ---------------------------------------------------------
+//
+// API 令牌用于以 "Authorization: Bearer <token>" 调用 /api/v1/*。数据库中只保存
+// 令牌的 SHA-256 哈希（由调用方计算）以及便于识别的前缀。
+
+// APIToken 是一条 API 令牌记录（不含明文）。
+type APIToken struct {
+	ID         int64
+	Name       string
+	Prefix     string
+	ReadOnly   bool
+	CreatedAt  time.Time
+	LastUsedAt time.Time
+}
+
+// CreateAPIToken 保存一个新的 API 令牌（tokenHash 为明文令牌的 SHA-256 十六进制）。
+func (s *Store) CreateAPIToken(ctx context.Context, name, tokenHash, prefix string, readOnly bool) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO api_tokens (name, token_hash, prefix, read_only, created_at) VALUES (?, ?, ?, ?, ?)`,
+		name, tokenHash, prefix, boolToInt(readOnly), time.Now().Unix())
+	if err != nil {
+		return 0, fmt.Errorf("store: create api token: %w", err)
+	}
+	return res.LastInsertId()
+}
+
+// LookupAPIToken 按哈希查找令牌；找到时顺带更新 last_used_at。
+func (s *Store) LookupAPIToken(ctx context.Context, tokenHash string) (APIToken, bool, error) {
+	var t APIToken
+	var ro int
+	var created, used int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name, prefix, read_only, created_at, last_used_at FROM api_tokens WHERE token_hash = ?`, tokenHash).
+		Scan(&t.ID, &t.Name, &t.Prefix, &ro, &created, &used)
+	if err == sql.ErrNoRows {
+		return APIToken{}, false, nil
+	}
+	if err != nil {
+		return APIToken{}, false, fmt.Errorf("store: lookup api token: %w", err)
+	}
+	t.ReadOnly = ro != 0
+	t.CreatedAt = time.Unix(created, 0)
+	now := time.Now()
+	t.LastUsedAt = now
+	_, _ = s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, now.Unix(), t.ID)
+	return t, true, nil
+}
+
+// ListAPITokens 返回全部 API 令牌（按创建时间排序）。
+func (s *Store) ListAPITokens(ctx context.Context) ([]APIToken, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, prefix, read_only, created_at, last_used_at FROM api_tokens ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list api tokens: %w", err)
+	}
+	defer rows.Close()
+	var out []APIToken
+	for rows.Next() {
+		var t APIToken
+		var ro int
+		var created, used int64
+		if err := rows.Scan(&t.ID, &t.Name, &t.Prefix, &ro, &created, &used); err != nil {
+			return nil, fmt.Errorf("store: scan api token: %w", err)
+		}
+		t.ReadOnly = ro != 0
+		t.CreatedAt = time.Unix(created, 0)
+		if used > 0 {
+			t.LastUsedAt = time.Unix(used, 0)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// DeleteAPIToken 吊销一个 API 令牌。
+func (s *Store) DeleteAPIToken(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM api_tokens WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("store: delete api token: %w", err)
 	}
 	return nil
 }

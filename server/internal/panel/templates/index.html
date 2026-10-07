@@ -132,6 +132,50 @@
     </form>
   </section>
 
+  <section class="card" id="api-tokens">
+    <h2>API 令牌</h2>
+    <p class="desc">用于调用 REST API（/api/v1/*），请求时携带 <code>Authorization: Bearer &lt;token&gt;</code>。只读令牌只能调用 GET 接口。</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>名称</th><th>前缀</th><th>权限</th><th>创建时间</th><th>最近使用</th><th style="width:90px"></th></tr></thead>
+        <tbody>
+        {{range .APITokens}}
+          <tr>
+            <td>{{.Name}}</td>
+            <td><span class="mono">{{.Prefix}}…</span></td>
+            <td>{{if .ReadOnly}}<span class="badge badge-gray">只读</span>{{else}}<span class="badge badge-amber">读写</span>{{end}}</td>
+            <td>{{.Created}}</td>
+            <td>{{.LastUsed}}</td>
+            <td>
+              <form class="inline" method="post" action="/api-tokens/{{.ID}}/delete" onsubmit="return confirm('确定吊销该 API 令牌？使用它的程序将立即无法访问。')"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                <button class="btn btn-danger btn-sm" type="submit">吊销</button>
+              </form>
+            </td>
+          </tr>
+        {{else}}
+          <tr><td class="empty" colspan="6">暂无 API 令牌</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    <form method="post" action="/api-tokens" style="margin-top:14px"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <div class="form-grid" style="max-width:620px">
+        <div class="field"><label for="tname">名称</label><input id="tname" name="name" placeholder="例如：CI 部署脚本"></div>
+        <div class="check-stack"><label class="check"><input type="checkbox" name="read_only" value="1">只读</label></div>
+        <div class="field" style="max-width:150px"><label>&nbsp;</label><button class="btn" type="submit">生成令牌</button></div>
+      </div>
+    </form>
+    {{if .NewAPIToken}}
+    <div style="margin-top:18px">
+      <p class="desc" style="margin-bottom:8px">新 API 令牌 — 只显示这一次，请立即复制保存：</p>
+      <div class="code-block">
+        <pre id="apitoken">{{.NewAPIToken}}</pre>
+        <button class="btn btn-sm copy" type="button" data-copy-target="#apitoken">复制</button>
+      </div>
+    </div>
+    {{end}}
+  </section>
+
   <section class="card">
     <h2>修改管理员密码</h2>
     <p class="desc">为了账号安全，修改密码需要输入当前密码，且新密码长度至少 6 位。</p>
