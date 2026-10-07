@@ -24,7 +24,7 @@ jobs:
           - goos: linux
             goarch: arm64
             build_client: true
-          # Windows AMD64 (Server only)
+          # Windows AMD64（仅构建服务端）
           - goos: windows
             goarch: amd64
             build_client: false

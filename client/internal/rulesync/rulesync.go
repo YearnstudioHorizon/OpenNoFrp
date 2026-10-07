@@ -1,11 +1,9 @@
-// Package rulesync is the Client's local reconciler for Server-pushed
-// forwarding rules. The Client receives a full RulesSnapshot message from
-// the Server after every handshake and after every panel-side rule change,
-// and dispatches incoming connection streams to the right local endpoint
-// based on the rule ID embedded in each stream's metadata -- picking the
-// forwarding strategy (plain / host-netns TPROXY-style spoofed dial /
-// container-netns spoofed dial) from a fresh DetectPortOwner probe of the
-// local target port.
+// Package rulesync 是 Client 端针对 Server 推送的转发规则的本地协调器。
+// 每次握手之后以及面板侧每次修改规则之后，Client 都会从 Server 收到一条
+// 完整的 RulesSnapshot 消息，并根据每个流的元数据中携带的规则 ID，把传入的
+// 连接流分发到正确的本地端点——转发策略（plain / 宿主机 netns 中的
+// TPROXY 式伪造源地址拨号 / 容器 netns 中的伪造源地址拨号）由对本地目标端口
+// 重新执行的 DetectPortOwner 探测结果决定。
 package rulesync
 
 import (
@@ -21,20 +19,19 @@ import (
 	"opennofrp/pkg/protocol"
 )
 
-// sharedFWMark is the fwmark used for every spoofed-source connection. It
-// must match the one used when installing the host/container policy routes
-// and the OUTPUT CONNMARK save/restore pair (tproxy.DefaultFWMark with the
-// same value).
+// sharedFWMark 是所有伪造源地址连接所使用的 fwmark。它必须与安装宿主机/容器
+// 策略路由以及 OUTPUT CONNMARK save/restore 规则对时所用的值一致
+// （即取值相同的 tproxy.DefaultFWMark）。
 const sharedFWMark = tproxy.DefaultFWMark
 
-// Reconciler holds the latest snapshot and per-rule runtime state.
+// Reconciler 保存最新的规则快照以及每条规则的运行时状态。
 type Reconciler struct {
 	Logger   *slog.Logger
 	StateDir string
 
 	mu            sync.RWMutex
 	rules         map[uint32]protocol.Rule
-	preparedNetns map[int]bool // container PID -> whether its netns got sysctls+route yet
+	preparedNetns map[int]bool // 容器 PID -> 其 netns 是否已配置 sysctls+路由
 	hostSetupDone bool
 }
 
@@ -47,8 +44,8 @@ func New(logger *slog.Logger, stateDir string) *Reconciler {
 	}
 }
 
-// Apply installs a fresh full snapshot; rules no longer present are
-// dropped (their ID lookups on subsequent streams then fail closed).
+// Apply 安装一份新的完整快照；不再存在的规则会被丢弃（后续流按其 ID
+// 查找时将以失败关闭的方式处理）。
 func (r *Reconciler) Apply(rules []protocol.Rule) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -59,7 +56,7 @@ func (r *Reconciler) Apply(rules []protocol.Rule) {
 	r.Logger.Info("rules snapshot applied", "count", len(rules))
 }
 
-// Get looks up a rule by its database ID (carried in StreamMetadata).
+// Get 按数据库 ID（由 StreamMetadata 携带）查找规则。
 func (r *Reconciler) Get(ruleID uint32) (protocol.Rule, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -67,8 +64,8 @@ func (r *Reconciler) Get(ruleID uint32) (protocol.Rule, bool) {
 	return rule, ok
 }
 
-// ServeStream dispatches one Server-opened stream using its RuleID. It owns
-// blocking on the relay; call from a goroutine.
+// ServeStream 根据 RuleID 分发一个由 Server 打开的流。它会阻塞直到中继结束，
+// 应在 goroutine 中调用。
 func (r *Reconciler) ServeStream(ctx context.Context, meta protocol.StreamMetadata, stream net.Conn) {
 	defer stream.Close()
 
@@ -102,11 +99,10 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 		return
 	}
 
-	// Source-IP preservation requested: pick strategy from a live probe of
-	// who owns the local target port. Re-running DetectPortOwner on every
-	// connection matters because a Docker container restart replaces its
-	// PID (different /proc/<pid>/ns/net), and a stale PID would otherwise
-	// silently enter the dead namespace.
+	// 已要求保留源 IP：根据对本地目标端口归属者的实时探测来选择策略。
+	// 每个连接都重新执行 DetectPortOwner 很重要，因为 Docker 容器重启后
+	// 其 PID 会改变（/proc/<pid>/ns/net 也随之不同），否则过期的 PID
+	// 会悄无声息地进入已失效的命名空间。
 	owner, err := envcheck.DetectPortOwner(rule.LocalPort)
 	if err != nil {
 		r.Logger.Warn("cannot determine port owner, falling back to plain forwarding",
@@ -155,11 +151,11 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 			return
 		}
 
-		// Bridge container: the entire spoofed-source connection must be
-		// created from INSIDE that container's network namespace -- no host
-		// iptables/TPROXY can survive Docker's bridge MASQUERADE, see
-		// docs/01-architecture.md section 6.5. The goroutine must
-		// runtime.LockOSThread-style Enter() this netns before socket().
+		// bridge 网络容器：整个伪造源地址的连接必须在该容器的网络命名空间
+		// 【内部】创建——宿主机上的任何 iptables/TPROXY 都无法在 Docker 的
+		// bridge MASQUERADE 之后保留下来，参见 docs/01-architecture.md 第 6.5 节。
+		// 该 goroutine 必须在调用 socket() 之前以 runtime.LockOSThread 的方式
+		// Enter() 此 netns。
 		containerIP := net.ParseIP("127.0.0.1")
 		upstreamCh := make(chan net.Conn, 1)
 		errCh := make(chan error, 1)
@@ -196,10 +192,9 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 	}
 }
 
-// UDP for preserve_source_ip is intentionally plain in v1: TPROXY+UDSP
-// spoofing is a separate validated-future area (see docs/01-architecture.md),
-// so we forward normally and keep the flow alive rather than silently
-// producing a non-functional spoofed flow.
+// 在 v1 中，开启 preserve_source_ip 的 UDP 有意采用普通转发：TPROXY+UDSP
+// 伪造是一个有待将来单独验证的领域（参见 docs/01-architecture.md），
+// 因此我们按普通方式转发并保持流可用，而不是悄悄生成一个无法工作的伪造流。
 func (r *Reconciler) serveUDP(ctx context.Context, rule protocol.Rule, meta protocol.StreamMetadata, stream net.Conn) {
 	if rule.PreserveSourceIP {
 		r.Logger.Warn("preserve_source_ip for UDP is not supported yet, forwarding as plain reverse proxy", "rule", rule.Name)
@@ -212,18 +207,16 @@ func (r *Reconciler) serveUDP(ctx context.Context, rule protocol.Rule, meta prot
 	}
 	defer upstream.Close()
 
-	// The stream is a byte pipe, UDP is datagrams: frame each datagram.
+	// 流是字节管道，而 UDP 是数据报：需对每个数据报进行分帧。
 	go copyUDPFrames(stream, upstream)
 	copyUDPFramesReverse(upstream, stream)
 }
 
-// ensureHostTPROXYReady applies the host-level sysctls, policy route, and
-// OUTPUT CONNMARK save/restore pair the spoofed dials need, exactly once
-// per process. No inbound TPROXY mangle rules: the yamux stream already
-// carries the original client address, so the Client dials directly with
-// SO_MARK/IP_TRANSPARENT -- but the reply direction still needs CONNMARK
-// restoration or the service's SYN-ACK routes out the default gateway and
-// the handshake times out (see tproxy.EnsureConnmarkReplyRules).
+// ensureHostTPROXYReady 应用伪造源地址拨号所需的宿主机级 sysctls、策略路由
+// 以及 OUTPUT CONNMARK save/restore 规则对，每个进程只执行一次。这里不需要
+// 入站 TPROXY mangle 规则：yamux 流已携带原始客户端地址，因此 Client 直接使用
+// SO_MARK/IP_TRANSPARENT 拨号——但回包方向仍需要 CONNMARK 恢复，否则服务的
+// SYN-ACK 会经默认网关路由出去，导致握手超时（参见 tproxy.EnsureConnmarkReplyRules）。
 func (r *Reconciler) ensureHostTPROXYReady() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -248,9 +241,8 @@ func (r *Reconciler) ensureHostTPROXYReady() error {
 	return nil
 }
 
-// ensureNetnsReady applies sysctls + policy route inside the container's
-// netns, exactly once per container PID. Executed via RunInNamespace so the
-// writes land on the container's own eth0/lo/all entries.
+// ensureNetnsReady 在容器的 netns 内应用 sysctls + 策略路由，每个容器 PID
+// 只执行一次。通过 RunInNamespace 执行，确保写入落在容器自身的 eth0/lo/all 条目上。
 func (r *Reconciler) ensureNetnsReady(cns netnsworker.ContainerNetns) error {
 	r.mu.Lock()
 	if r.preparedNetns[cns.PID] {
@@ -270,9 +262,8 @@ func (r *Reconciler) ensureNetnsReady(cns netnsworker.ContainerNetns) error {
 		if err := tproxy.EnsurePolicyRoute(tproxy.DefaultRouteTable, sharedFWMark); err != nil {
 			return err
 		}
-		// Same reply-path requirement as the host path, but installed
-		// inside the container's netns (we're setns()'d in, so
-		// iptables-legacy operates on the container's own tables).
+		// 回包路径的要求与宿主机路径相同，但安装在容器的 netns 内
+		// （我们已通过 setns() 进入，因此 iptables-legacy 操作的是容器自己的表）。
 		return tproxy.EnsureConnmarkReplyRules(sharedFWMark)
 	})
 	if err != nil {
@@ -313,9 +304,8 @@ func relay(a, b net.Conn) {
 	<-done
 }
 
-// UDP framing over a stream: [uint16 big-endian length][payload] per datagram.
-// The first (metadata-bearing) direction already has its header consumed by
-// ReadStreamMetadata before this framing begins.
+// 在流上对 UDP 分帧：每个数据报格式为 [uint16 大端序长度][payload]。
+// 第一个（携带元数据的）方向在分帧开始之前，其头部已被 ReadStreamMetadata 读取消费。
 func copyUDPFrames(stream, upstream net.Conn) {
 	buf := make([]byte, 64*1024)
 	for {

@@ -9,34 +9,26 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// SpoofedDialer connects to a local service while making the connection's
-// source IP appear to be an arbitrary address (the original remote client's
-// real IP), using the Linux IP_TRANSPARENT socket option. This requires
-// root/CAP_NET_ADMIN+CAP_NET_RAW and the destination to be reachable via a
-// route table that treats the chosen source address as locally deliverable
-// (see EnsurePolicyRoute in route.go, which this package depends on being
-// set up beforehand).
+// SpoofedDialer 连接本地服务，同时借助 Linux 的 IP_TRANSPARENT 套接字选项，
+// 让该连接的源 IP 显示为任意地址（即原始远端客户端的真实 IP）。这需要
+// root/CAP_NET_ADMIN+CAP_NET_RAW 权限，并且目标必须可经由一张把所选源地址
+// 视为可本地投递的路由表到达（参见 route.go 中的 EnsurePolicyRoute，本包依赖
+// 它事先完成配置）。
 //
-// Timeout is important: in the pathological case where the kernel-level
-// routing/CONNMARK plumbing is misconfigured, this connect() call hangs
-// until TCP's own SYN retransmission timeout rather than failing fast. A
-// generous but bounded timeout (a few seconds) turns a silent hang into an
-// actionable error.
+// Timeout 很重要：在内核级路由/CONNMARK 配置有误的异常情况下，这个 connect()
+// 调用会一直挂起，直到 TCP 自身的 SYN 重传超时，而不是快速失败。设置一个宽松
+// 但有上限的超时（几秒钟），可以把无声的挂起变成可据以排查的错误。
 type SpoofedDialer struct {
-	Timeout int // seconds, 0 = use a sensible default (4s)
+	Timeout int // 单位为秒，0 = 使用合理的默认值（4s）
 
-	// FWMark, if nonzero, is set via SO_MARK on the outbound connect()
-	// socket. This is REQUIRED for the connection to succeed: it makes the
-	// kernel's policy routing (see EnsurePolicyRoute/table 100) recognize
-	// this new connection -- and critically, the SYN-ACK reply packet sent
-	// back by the local service -- as belonging to our "deliver locally"
-	// routing class. Without this, the reply packet's CONNMARK restoration
-	// has nothing to restore (the connection was never marked to begin
-	// with), the handshake silently never completes, and connect() hangs
-	// until timeout. This was discovered through painful end-to-end testing
-	// after the sandbox validation runs had, in retrospect, only exercised
-	// scenarios where this happened to not matter. Must match the FWMark
-	// used in the corresponding tproxy.RuleSpec.
+	// FWMark 若非零，则通过 SO_MARK 设置到出站 connect() 所用的套接字上。
+	// 这是连接成功的【必要条件】：它让内核的策略路由（参见
+	// EnsurePolicyRoute/table 100）把这个新连接——以及至关重要的、由本地服务
+	// 发回的 SYN-ACK 回包——识别为属于我们的“本地投递”路由类别。若没有它，
+	// 回包的 CONNMARK 恢复将无标记可恢复（该连接从一开始就没有被打标记），
+	// 握手会无声地永远无法完成，connect() 会一直挂起直到超时。这一点是在
+	// 痛苦的端到端测试中才发现的；事后回看，之前的沙箱验证只覆盖了恰好
+	// 不受此影响的场景。必须与对应 tproxy.RuleSpec 中使用的 FWMark 一致。
 	FWMark uint32
 }
 
@@ -47,10 +39,9 @@ func (d SpoofedDialer) timeoutSeconds() int {
 	return d.Timeout
 }
 
-// DialSpoofed connects to (targetIP, targetPort) with the connection's local
-// (source) address set to (spoofSourceIP, 0) -- an ephemeral port is chosen
-// automatically. The returned net.Conn behaves like any other TCP
-// connection; the caller is responsible for closing it.
+// DialSpoofed 连接到 (targetIP, targetPort)，并将连接的本地（源）地址设置为
+// (spoofSourceIP, 0)——临时端口会被自动选择。返回的 net.Conn 与其他任何 TCP
+// 连接的行为相同；由调用方负责关闭它。
 func (d SpoofedDialer) DialSpoofed(ctx context.Context, spoofSourceIP net.IP, targetIP net.IP, targetPort uint16) (net.Conn, error) {
 	ipv4 := targetIP.To4() != nil
 	var domain int
@@ -64,7 +55,7 @@ func (d SpoofedDialer) DialSpoofed(ctx context.Context, spoofSourceIP net.IP, ta
 	if err != nil {
 		return nil, fmt.Errorf("tproxy: socket: %w", err)
 	}
-	// From here on, any early return must close fd to avoid leaking it.
+	// 从这里开始，任何提前返回都必须关闭 fd，以免泄漏。
 	closeOnErr := func(err error) (net.Conn, error) {
 		unix.Close(fd)
 		return nil, err
@@ -74,7 +65,7 @@ func (d SpoofedDialer) DialSpoofed(ctx context.Context, spoofSourceIP net.IP, ta
 		return closeOnErr(fmt.Errorf("tproxy: SO_REUSEADDR: %w", err))
 	}
 
-	// IP_TRANSPARENT is what allows bind() to a non-local address below.
+	// 正是 IP_TRANSPARENT 使下面的 bind() 能够绑定到非本地地址。
 	level := unix.SOL_IP
 	if !ipv4 {
 		level = unix.SOL_IPV6
@@ -134,11 +125,10 @@ func bindSpoofedSource(fd int, ipv4 bool, srcIP net.IP) error {
 }
 
 func connectWithTimeout(ctx context.Context, fd int, ipv4 bool, targetIP net.IP, targetPort uint16, timeoutSeconds int) error {
-	// Make the socket non-blocking so connect() returns immediately with
-	// EINPROGRESS, then use select/poll-style waiting bounded by both the
-	// caller's context and our own timeout. This is what turns a
-	// misconfigured-routing hang into a clean, bounded error instead of
-	// blocking for the OS's full SYN retry period (which can be 2+ minutes).
+	// 将套接字设为非阻塞，使 connect() 立即返回 EINPROGRESS，然后采用
+	// select/poll 式的等待，其时长同时受调用方 context 和我们自己的超时约束。
+	// 正是这样，路由配置错误导致的挂起才会变成一个清晰、有时限的错误，
+	// 而不是阻塞整个操作系统 SYN 重试周期（可能长达 2 分钟以上）。
 	if err := unix.SetNonblock(fd, true); err != nil {
 		return fmt.Errorf("tproxy: set non-blocking: %w", err)
 	}
@@ -168,7 +158,7 @@ func connectWithTimeout(ctx context.Context, fd int, ipv4 bool, targetIP net.IP,
 		return fmt.Errorf("tproxy: connect to %s:%d: %w", targetIP, targetPort, connectErr)
 	}
 
-	// Wait for the socket to become writable (connect complete) or time out.
+	// 等待套接字变为可写（connect 完成）或超时。
 	pollCtx, cancel := context.WithTimeoutCause(ctx, secondsToDuration(timeoutSeconds),
 		fmt.Errorf("tproxy: connect to %s:%d timed out after %ds (check: TPROXY rules, policy routing table, CONNMARK save/restore, sysctls -- see docs/01-architecture.md section 6.1)", targetIP, targetPort, timeoutSeconds))
 	defer cancel()

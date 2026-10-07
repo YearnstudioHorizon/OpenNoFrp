@@ -1,24 +1,24 @@
 #!/bin/bash
-# OpenNoFrp Client installer (Linux).
+# OpenNoFrp 客户端安装脚本 (Linux)。
 #
-# What this script does (and nothing else):
-#   1. Copies the opennofrp-client binary to /opt/opennofrp/opennofrp-client
-#   2. Writes a starter config to /etc/opennofrp/client.toml (if not present)
-#   3. Installs a systemd unit (not started automatically -- see below)
-#   4. Runs "opennofrp-client envcheck" so you know BEFORE starting the
-#      service whether preserve_source_ip will actually work on this host
+# 本脚本只做以下几件事（除此之外不做任何事）：
+#   1. 将 opennofrp-client 二进制文件复制到 /opt/opennofrp/opennofrp-client
+#   2. 将初始配置写入 /etc/opennofrp/client.toml（若尚不存在）
+#   3. 安装 systemd 单元（不会自动启动 -- 见下文）
+#   4. 运行 "opennofrp-client envcheck"，让你在启动服务之前就知道
+#      preserve_source_ip 在本机上能否真正生效
 #
-# This script deliberately does NOT:
-#   - touch iptables/nftables/ip route directly (the Client binary itself
-#     does that, only once started, and only within its own dedicated
-#     fwmark/table/chain-comment namespace -- see docs/01-architecture.md)
-#   - enable or start the systemd service for you. You must edit
-#     /etc/opennofrp/client.toml first (set server.addr/token and your
-#     [[proxy]] rules), then run:
+# 本脚本刻意不会：
+#   - 直接修改 iptables/nftables/ip route（这些由 Client 二进制自身负责，
+#     且仅在启动后进行，并只在其专属的
+#     fwmark/table/chain-comment 命名空间内操作 -- 见 docs/01-architecture.md）
+#   - 替你启用或启动 systemd 服务。你必须先编辑
+#     /etc/opennofrp/client.toml（设置 server.addr/token 以及你的
+#     [[proxy]] 规则），然后运行：
 #       systemctl enable --now opennofrp-client
-#   - overwrite an existing config file
+#   - 覆盖已存在的配置文件
 #
-# Safe to re-run: every step below checks for existing state first.
+# 可安全重复运行：下面的每一步都会先检查现有状态。
 
 set -euo pipefail
 

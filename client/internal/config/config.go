@@ -1,11 +1,9 @@
-// Package config loads and validates the OpenNoFrp Client configuration.
+// Package config 负责加载并校验 OpenNoFrp Client 的配置。
 //
-// The file format is TOML. After the productization refactor the Client no
-// longer defines its own [[proxy]] rules: all forwarding rules live in the
-// Server's database, are managed via the web panel, and are pushed to the
-// Client over the control connection. The Client's local configuration is
-// therefore deliberately minimal -- how to reach the Server, plus the
-// one-time registration token used the first time this machine boots.
+// 文件格式为 TOML。经过产品化重构后，Client 不再自行定义 [[proxy]] 规则：
+// 所有转发规则都存放在 Server 的数据库中，通过 Web 面板管理，并经控制连接
+// 推送给 Client。因此 Client 的本地配置被刻意精简 —— 只包含如何连接
+// Server，以及本机首次启动时使用的一次性注册 token。
 package config
 
 import (
@@ -16,40 +14,39 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Config is the top-level Client configuration, typically loaded from
-// /etc/opennofrp/client.toml (Linux) or a path passed via -c flag.
+// Config 是 Client 的顶层配置，通常从 /etc/opennofrp/client.toml（Linux）
+// 或通过 -c 参数传入的路径加载。
 type Config struct {
 	Server ServerConfig `toml:"server"`
 	Log    LogConfig    `toml:"log"`
 }
 
-// ServerConfig describes how to reach the OpenNoFrp Server control port.
+// ServerConfig 描述如何连接 OpenNoFrp Server 的控制端口。
 type ServerConfig struct {
-	Addr        string `toml:"addr"`        // e.g. "120.26.183.14"
-	Port        int    `toml:"port"`        // control port, e.g. 17000
-	Token       string `toml:"token"`       // one-time registration token from the panel; only needed when no credentials file exists yet
+	Addr        string `toml:"addr"`        // 例如 "120.26.183.14"
+	Port        int    `toml:"port"`        // 控制端口，例如 17000
+	Token       string `toml:"token"`       // 来自面板的一次性注册 token；仅在尚不存在凭据文件时需要
 	Fingerprint string `toml:"fingerprint"` // 服务端 TLS 证书的 SHA-256 指纹 (Certificate Pinning)
 
-	// HeartbeatIntervalSeconds controls how often the Client sends a
-	// heartbeat on the control connection. Defaults to 10 if zero.
+	// HeartbeatIntervalSeconds 控制 Client 在控制连接上发送心跳的频率。
+	// 为零时默认为 10。
 	HeartbeatIntervalSeconds int `toml:"heartbeat_interval_seconds"`
 
-	// ReconnectMinSeconds / ReconnectMaxSeconds control exponential backoff
-	// when the control connection drops and needs to be re-established.
+	// ReconnectMinSeconds / ReconnectMaxSeconds 控制控制连接断开并需要
+	// 重新建立时的指数退避。
 	ReconnectMinSeconds int `toml:"reconnect_min_seconds"`
 	ReconnectMaxSeconds int `toml:"reconnect_max_seconds"`
 }
 
-// LogConfig controls logging verbosity/output.
+// LogConfig 控制日志的详细程度/输出位置。
 type LogConfig struct {
-	Level string `toml:"level"` // "debug", "info", "warn", "error"
-	File  string `toml:"file"`  // empty = stdout
+	Level string `toml:"level"` // "debug"、"info"、"warn"、"error"
+	File  string `toml:"file"`  // 为空 = stdout
 }
 
-// CredentialsPath returns where the permanent client_id/client_secret pair
-// is persisted after a successful one-time registration. Sits next to the
-// main config by default, overridable via the OPENNOFRP_CREDENTIALS env var
-// (useful for testing inside the dev VM without touching /etc).
+// CredentialsPath 返回一次性注册成功后永久 client_id/client_secret 对的
+// 持久化位置。默认与主配置文件位于同一目录，可通过环境变量
+// OPENNOFRP_CREDENTIALS 覆盖（便于在开发虚拟机中测试而无需改动 /etc）。
 func CredentialsPath(configPath string) string {
 	if v := os.Getenv("OPENNOFRP_CREDENTIALS"); v != "" {
 		return v
@@ -57,17 +54,15 @@ func CredentialsPath(configPath string) string {
 	return filepath.Join(filepath.Dir(configPath), "client_credentials.toml")
 }
 
-// Credentials is the permanent identity the Client uses for every
-// connection after its one-time registration completes.
+// Credentials 是 Client 在完成一次性注册后用于每次连接的永久身份。
 type Credentials struct {
 	ClientID     string `toml:"client_id"`
 	ClientSecret string `toml:"client_secret"`
 	Fingerprint  string `toml:"fingerprint"` // 首次信任 (TOFU) 保存的服务端证书指纹
 }
 
-// LoadCredentials reads persisted credentials, returning (nil, nil) -- not
-// an error -- when the file simply does not exist yet (i.e. this machine
-// has never completed registration).
+// LoadCredentials 读取已持久化的凭据；当文件尚不存在时（即本机从未完成
+// 注册）返回 (nil, nil) —— 而不是错误。
 func LoadCredentials(path string) (*Credentials, error) {
 	var c Credentials
 	if _, err := toml.DecodeFile(path, &c); err != nil {
@@ -82,8 +77,8 @@ func LoadCredentials(path string) (*Credentials, error) {
 	return &c, nil
 }
 
-// SaveCredentials atomically writes the permanent credentials to path with
-// owner-only permissions (the client_secret is a password-equivalent).
+// SaveCredentials 以仅所有者可访问的权限将永久凭据原子地写入 path
+// （client_secret 等同于密码）。
 func SaveCredentials(path string, c Credentials) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("config: mkdir for credentials: %w", err)
@@ -99,7 +94,7 @@ func SaveCredentials(path string, c Credentials) error {
 	return nil
 }
 
-// Load reads and validates a Config from the given path.
+// Load 从给定路径读取并校验 Config。
 func Load(path string) (*Config, error) {
 	var cfg Config
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
@@ -140,9 +135,8 @@ func validate(cfg *Config) error {
 	return nil
 }
 
-// ExampleTOML returns a commented example configuration, used by the install
-// script to seed a starter config file. After the refactor there is no
-// [[proxy]] section here -- rules are created in the web panel instead.
+// ExampleTOML 返回一份带注释的示例配置，供安装脚本生成初始配置文件。
+// 重构之后这里不再有 [[proxy]] 段 —— 规则改为在 Web 面板中创建。
 func ExampleTOML() string {
 	return `# OpenNoFrp Client configuration
 # Forwarding rules are NOT defined here. Open the Server's web panel,
@@ -173,9 +167,8 @@ level = "info"
 `
 }
 
-// WriteExampleConfig writes a starter config file to path, failing if it
-// already exists (the install script should not silently clobber an
-// existing configuration).
+// WriteExampleConfig 将初始配置文件写入 path；若文件已存在则失败
+// （安装脚本不应悄无声息地覆盖已有配置）。
 func WriteExampleConfig(path string) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("config: %s already exists, refusing to overwrite", path)

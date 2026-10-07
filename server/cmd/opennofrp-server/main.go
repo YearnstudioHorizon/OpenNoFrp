@@ -1,11 +1,10 @@
-// Command opennofrp-server is the entry point for the OpenNoFrp cloud
-// Server. It is a pure userspace TCP/UDP forwarder: it never touches
-// iptables/nftables, routing tables, TUN/TAP devices, or kernel network
-// parameters. See docs/01-architecture.md and docs/02-risk-assessment.md.
+// Command opennofrp-server 是 OpenNoFrp 云端 Server 的入口程序。它是一个
+// 纯用户态的 TCP/UDP 转发器：从不触碰 iptables/nftables、路由表、TUN/TAP
+// 设备或内核网络参数。参见 docs/01-architecture.md 和
+// docs/02-risk-assessment.md。
 //
-// Post-productization, one process hosts three things that used to be
-// separate concerns: the public-rule-driven port listeners, the Client
-// control listener, and the admin web panel.
+// 产品化之后，一个进程同时承载了三项原本彼此独立的职责：由公网规则驱动的
+// 端口监听器、Client 控制监听器，以及管理员 Web 面板。
 package main
 
 import (
@@ -138,16 +137,15 @@ func runServer() {
 	}
 	s.listener = listener.NewManager(cfg.Server.BindAddr, logger, s.sessionFor)
 
-	// Reserve SSH (and similar host-management) ports so an enabled rule
-	// can never collide with the operator's own access path into the box.
+	// 保留 SSH（及类似的主机管理）端口，确保已启用的规则永远不会与运维人员
+	// 自身进入该主机的访问通道发生冲突。
 	reserveHostSSHPorts(ctx, st, logger)
 
-	// Bring public listeners up to match the stored rule set before any
-	// Client has even reconnected -- enabling a rule persists it, so the
-	// port must stay open across Server restarts.
+	// 在任何 Client 重新连接之前，就先按已存储的规则集启动公网监听器——
+	// 启用规则即会将其持久化，因此端口必须在 Server 重启后依然保持开放。
 	s.reconcileListeners(ctx)
 
-	// Public control listener (wrapped in TLS with Certificate Pinning support)
+	// 公网控制监听器（以 TLS 包装，支持 Certificate Pinning 证书固定）
 	tlsCert, fingerprint, err := tlsutil.LoadOrCreateCert(cfg.Server.TLSCertPath, cfg.Server.TLSKeyPath, []string{cfg.Server.BindAddr})
 	if err != nil {
 		logger.Error("failed to load or create TLS certificate", "error", err)
@@ -170,7 +168,7 @@ func runServer() {
 	}()
 	go s.acceptControlConns(ctx, ln)
 
-	// Admin panel.
+	// 管理面板。
 	p := panel.New(st, logger, s.onAnyRuleChanged, cfg.Server.PublicBaseURL,
 		hostFromAddr(cfg.Server.BindAddr), cfg.Server.ControlPort, fingerprint, cfg.Server.ClientBinDir)
 	panelAddr := fmt.Sprintf("%s:%d", cfg.Server.PanelAddr, cfg.Server.PanelPort)
@@ -198,7 +196,7 @@ type server struct {
 	limiter  *handshakeLimiter
 
 	mu       sync.Mutex
-	sessions map[string]*session.Session // clientID -> live session
+	sessions map[string]*session.Session // clientID -> 活跃会话
 }
 
 func (s *server) sessionFor(clientID string) *session.Session {
@@ -213,7 +211,7 @@ func (s *server) registerSession(sess *session.Session) {
 	s.sessions[sess.ClientID] = sess
 	s.mu.Unlock()
 	if old != nil {
-		old.Yamux.Close() // displace the stale connection; its client will retry
+		old.Yamux.Close() // 顶替陈旧连接；其客户端会自行重试
 	}
 }
 
@@ -225,9 +223,9 @@ func (s *server) unregisterSession(sess *session.Session) {
 	}
 }
 
-// onAnyRuleChanged is wired into the panel: any rule mutation refreshes the
-// public listener set AND pushes a fresh snapshot to every connected
-// Client (each Client receives only its own enabled rules).
+// onAnyRuleChanged 接入面板：任何规则变更都会刷新公网监听器集合，并且
+// 向每个已连接的 Client 推送一份最新快照（每个 Client 只会收到属于自己的
+// 已启用规则）。
 func (s *server) onAnyRuleChanged() {
 	ctx := context.Background()
 	s.reconcileListeners(ctx)
@@ -298,14 +296,12 @@ func (s *server) handleControlConn(conn net.Conn) {
 		return
 	}
 
-	// First message is either a one-time registration (no credentials yet)
-	// or the normal handshake.
+	// 第一条消息要么是一次性注册（此时尚无凭据），要么是常规握手。
 	if first.Type == protocol.MsgRegisterRequest {
 		if _, err := s.handleRegister(conn, first, conn.RemoteAddr()); err != nil {
-			return // handleRegister already wrote the error response
+			return // handleRegister 已经写回了错误响应
 		}
-		// After registration the client sends the real handshake on the same
-		// TCP connection, in a second message.
+		// 注册完成后，客户端会在同一条 TCP 连接上以第二条消息发送真正的握手。
 		conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 		second, err := readControlMessage(conn)
 		if err != nil || second.Type != protocol.MsgHandshakeRequest {
@@ -353,8 +349,8 @@ func (s *server) handleControlConn(conn net.Conn) {
 	}
 	defer ym.Close()
 
-	// The Client opens its control stream immediately after yamux starts;
-	// accept it here (this is the only Client-opened stream).
+	// Client 在 yamux 启动后会立即打开其控制流；在此处接受它（这是唯一一条
+	// 由 Client 打开的流）。
 	ctrlStream, err := ym.AcceptStream()
 	if err != nil {
 		return
@@ -364,14 +360,14 @@ func (s *server) handleControlConn(conn net.Conn) {
 	s.registerSession(sess)
 	defer s.unregisterSession(sess)
 
-	// Record the live client immediately (handshake success) so the panel
-	// shows it online right away, then again on every heartbeat.
+	// 握手成功后立即记录该活跃客户端，使面板能马上显示其在线，之后每次心跳
+	// 时再次记录。
 	_ = s.store.TouchClient(context.Background(), req.ClientID, conn.RemoteAddr().String())
 
-	// Record activity + keep watching heartbeats on the control stream.
+	// 记录活动情况，并持续监视控制流上的心跳。
 	go s.watchControlStream(sess, ym, ctrlStream)
 
-	// Push the initial snapshot.
+	// 推送初始快照。
 	if rules, err := s.store.ListEnabledRulesForClient(context.Background(), req.ClientID); err == nil {
 		if err := sess.PushRulesSnapshot(toWireRules(rules)); err != nil {
 			s.logger.Warn("initial rules snapshot push failed", "error", err)
@@ -380,22 +376,21 @@ func (s *server) handleControlConn(conn net.Conn) {
 
 	s.logger.Info("client session established", "client_id", req.ClientID, "remote", conn.RemoteAddr())
 
-	// The Client accepts server-opened streams; the Server opens those
-	// per-public-connection. There is nothing more to read here -- block
-	// until the session ends so handleControlConn's deferred cleanup runs.
+	// Client 负责接受由服务端打开的流；Server 为每条公网连接各打开一条流。
+	// 这里已没有更多内容需要读取——阻塞直到会话结束，以便执行
+	// handleControlConn 中 defer 的清理逻辑。
 	for {
-		// The Client does not open extra streams; when it does (or when
-		// the session dies) AcceptStream returns/errors, at which point
-		// deferred cleanup runs. Per-connection streams are opened BY
-		// the server (listener path) instead.
+		// Client 不会打开额外的流；一旦它这样做（或会话终止），AcceptStream
+		// 就会返回/报错，此时执行 defer 的清理逻辑。每条连接对应的流改由
+		// 服务端（监听器路径）打开。
 		if _, err := ym.AcceptStream(); err != nil {
 			return
 		}
 	}
 }
 
-// watchControlStream reads client->server heartbeat frames on the control
-// stream and times the session out when they stop arriving.
+// watchControlStream 读取控制流上 client->server 方向的心跳帧，并在心跳
+// 停止到达时使会话超时。
 func (s *server) watchControlStream(sess *session.Session, ym *yamux.Session, ctrl net.Conn) {
 	timeout := time.Duration(s.cfg.Server.HeartbeatTimeoutSeconds) * time.Second
 	for {
@@ -440,8 +435,8 @@ func (s *server) validateHandshake(req protocol.HandshakeRequest) error {
 	return nil
 }
 
-// handleRegister validates a one-time token, mints a new permanent Client
-// identity, persists it, consumes the token, and writes the response.
+// handleRegister 校验一次性令牌，签发一个新的永久 Client 身份并将其持久化，
+// 随后消费该令牌并写回响应。
 func (s *server) handleRegister(conn net.Conn, first *controlMsg, remote net.Addr) (string, error) {
 	var req protocol.RegisterRequest
 	if err := json.Unmarshal(first.raw, &req); err != nil {
@@ -451,18 +446,15 @@ func (s *server) handleRegister(conn net.Conn, first *controlMsg, remote net.Add
 	if req.Hostname != "" {
 		name = req.Hostname
 	}
-	// Consume token BEFORE minting user to prevent TOCTOU replay: token is
-	// tied to this token string, and CreateClient needs a name anyway; the
-	// name for the client row we use the register-time label fetched
-	// post-consume. Simpler order: mint client, then consume token by
-	// verified-once semantics... but consuming second would leak a client row
-	// on bad token. Consume first: the token row's label gives us the name.
-	// We can't consume without a client id... so: validate token exists & is
-	// fresh via a read, mint client, then atomic consume marking consumed_by.
-	// To keep it simple and correct, we consume with a placeholder client id
-	// of "" then update -- not supported. Instead do: consume-with-id in one
-	// tx: first CreateClient, then ConsumeRegisterToken; if consume fails we
-	// delete the just-created client row.
+	// 在签发用户之前先消费令牌，以防止 TOCTOU 重放：令牌与该令牌字符串绑定，
+	// 而 CreateClient 无论如何都需要一个名称；client 行的名称使用消费之后
+	// 取得的注册时标签。更简单的顺序是：先签发 client，再按“仅校验一次”的
+	// 语义消费令牌……但后消费的话，令牌无效时会遗留一条 client 行。先消费：
+	// 令牌行的标签可以提供名称。可没有 client id 就无法消费……所以：先通过
+	// 一次读取校验令牌存在且未过期，再签发 client，然后原子地消费并标记
+	// consumed_by。为保持简单且正确，曾考虑用占位 client id "" 消费后再更新
+	// ——但这不受支持。改为：在一个事务中带 id 消费：先 CreateClient，再
+	// ConsumeRegisterToken；若消费失败，则删除刚创建的 client 行。
 	clientID, clientSecret, err := s.store.CreateClient(context.Background(), name)
 	if err != nil {
 		protocol.WriteJSONMessage(conn, protocol.RegisterResponse{Type: protocol.MsgRegisterResponse, OK: false, Error: err.Error()})
@@ -484,18 +476,18 @@ func (s *server) handleRegister(conn net.Conn, first *controlMsg, remote net.Add
 	return clientID, nil
 }
 
-// --- helpers ---------------------------------------------------------------
+// --- 辅助函数 ---------------------------------------------------------------
 
 type controlMsg struct {
 	Type protocol.ControlMessageType
 	raw  []byte
 }
 
-// readControlMessage reads one length-prefixed JSON control message (the
-// handshake-phase messages that happen BEFORE yamux framing takes over).
+// readControlMessage 读取一条带长度前缀的 JSON 控制消息（即在 yamux 分帧
+// 接管之前的握手阶段消息）。
 func readControlMessage(conn net.Conn) (*controlMsg, error) {
-	// We only need its Type field to dispatch; unmarshal into a generic map
-	// via a two-pass approach: read length prefix, read payload, parse.
+	// 分发时只需要其 Type 字段；采用两步法解析到通用结构：先读长度前缀，
+	// 再读载荷，最后解析。
 	lenHdr := make([]byte, 4)
 	if _, err := io.ReadFull(conn, lenHdr); err != nil {
 		return nil, err
@@ -530,9 +522,8 @@ func hostFromAddr(bindAddr string) string {
 	return bindAddr
 }
 
-// reserveHostSSHPorts adds the ports OpenSSH listens on to the reserved set
-// so no panel-created rule can ever collide with the operator's own
-// management access to the server.
+// reserveHostSSHPorts 将 OpenSSH 监听的端口加入保留集合，确保面板创建的
+// 任何规则都不会与运维人员自身对服务器的管理访问发生冲突。
 func reserveHostSSHPorts(ctx context.Context, st *store.Store, logger *slog.Logger) {
 	ports := map[uint16]string{22: "ssh(default)"}
 	if data, err := os.ReadFile("/etc/ssh/sshd_config"); err == nil {
@@ -565,8 +556,8 @@ func toWireRules(rules []store.Rule) []protocol.Rule {
 	return out
 }
 
-// ensureAdminSeeded creates the initial admin account on first boot and
-// prints / writes the generated password. Existing accounts are untouched.
+// ensureAdminSeeded 在首次启动时创建初始管理员账号，并打印/写出生成的
+// 密码。已存在的账号不受影响。
 func ensureAdminSeeded(ctx context.Context, st *store.Store, cfg *config.Config, logger *slog.Logger) error {
 	exists, err := st.AdminExists(ctx)
 	if err != nil {
@@ -577,7 +568,7 @@ func ensureAdminSeeded(ctx context.Context, st *store.Store, cfg *config.Config,
 	}
 	pwBytes := make([]byte, 9)
 	rand.Read(pwBytes)
-	initialPassword := hex.EncodeToString(pwBytes) // 18-char hex
+	initialPassword := hex.EncodeToString(pwBytes) // 18 个字符的十六进制串
 	if err := st.CreateAdmin(ctx, "admin", initialPassword); err != nil {
 		return err
 	}

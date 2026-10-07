@@ -7,13 +7,13 @@ import (
 	"strings"
 )
 
-// sysctlPath maps a dotted sysctl name (e.g. "net.ipv4.conf.lo.rp_filter")
-// to its /proc/sys file path.
+// sysctlPath 将点分隔的 sysctl 名称（例如 "net.ipv4.conf.lo.rp_filter"）
+// 映射为对应的 /proc/sys 文件路径。
 func sysctlPath(name string) string {
 	return "/proc/sys/" + strings.ReplaceAll(name, ".", "/")
 }
 
-// readSysctl returns the current value of a sysctl.
+// readSysctl 返回某个 sysctl 的当前值。
 func readSysctl(name string) (string, error) {
 	data, err := os.ReadFile(sysctlPath(name))
 	if err != nil {
@@ -22,7 +22,7 @@ func readSysctl(name string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// writeSysctl sets a sysctl value. Requires root.
+// writeSysctl 设置某个 sysctl 的值。需要 root 权限。
 func writeSysctl(name, value string) error {
 	path := sysctlPath(name)
 	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
@@ -31,44 +31,36 @@ func writeSysctl(name, value string) error {
 	return nil
 }
 
-// SysctlSetting is one (name, desired value) pair the tproxy manager needs.
+// SysctlSetting 是 tproxy manager 所需的一组（名称，期望值）对。
 type SysctlSetting struct {
 	Name  string
 	Value string
 }
 
-// requiredSysctls returns the full list of sysctls that must be set to the
-// given value for TPROXY + spoofed-source-IP connects to work, for the given
-// network interface name (the interface that will receive inbound traffic
-// for the proxied port, e.g. "eth0").
+// requiredSysctls 针对给定的网络接口名称（即将接收被代理端口入站流量的
+// 接口，例如 "eth0"），返回为使 TPROXY + 伪造源 IP 的 connect 正常工作
+// 而必须设置为指定值的完整 sysctl 列表。
 //
-// Rationale for each one (see docs/01-architecture.md section 6.1 for the
-// full debugging history that led to this list):
-//   - route_localnet=1 on lo: without this, the kernel refuses to route
-//     packets whose destination is 127.0.0.0/8 through non-loopback paths
-//     during the TPROXY-redirected local delivery, and more importantly
-//     allows 127.0.0.1 to be treated as a valid connect() target even
-//     though the source address is spoofed to an external-looking IP.
-//   - accept_local=1 on lo: permits accepting packets whose source address
-//     claims to be from a "martian" range when arriving on lo, which is
-//     exactly what happens when our spoofed-source upstream connection's
-//     SYN packet loops back through lo.
-//   - rp_filter=0 and accept_local=1 under "all", not just on lo and the
-//     ingress interface: this was discovered the hard way during real
-//     end-to-end testing (not just the earlier sandbox probing) -- Linux's
-//     reverse-path-filtering and martian-source-acceptance checks apply the
-//     STRICTER (in rp_filter's case, the max; for accept_local, effectively
-//     requiring both the specific interface's value AND "all"'s value to
-//     permit it) of the per-interface and "all" settings. Setting only
-//     net.ipv4.conf.lo.accept_local=1 without also setting
-//     net.ipv4.conf.all.accept_local=1 silently leaves the real inbound
-//     path's CONNMARK --save-mark unable to actually tag the conntrack
-//     entry (the rule's packet counter still increments -- TPROXY is a
-//     terminating target and by the time CONNMARK runs, the connection
-//     tracking entry classification has already been finalized as
-//     "invalid source, mark not settable" under the stricter policy).
-//     Always set both "all" and the specific interface for every one of
-//     these three sysctls.
+// 每一项的理由（形成这份列表的完整调试历程参见 docs/01-architecture.md
+// 第 6.1 节）：
+//   - lo 上的 route_localnet=1：没有它，内核在 TPROXY 重定向后的本地交付
+//     过程中会拒绝通过非回环路径路由目标为 127.0.0.0/8 的数据包；更重要的
+//     是，它使 127.0.0.1 即使在源地址被伪造为看似外部的 IP 时，也能被视为
+//     合法的 connect() 目标。
+//   - lo 上的 accept_local=1：允许接受到达 lo 时源地址声称来自 "martian"
+//     范围的数据包，而这正是我们伪造源地址的上游连接的 SYN 包经 lo 回环时
+//     发生的情况。
+//   - 在 "all" 下（而不仅仅是在 lo 和入站接口上）设置 rp_filter=0 和
+//     accept_local=1：这是在真实的端到端测试中（而不仅仅是早期的沙箱探测
+//     中）吃了苦头才发现的——Linux 的反向路径过滤和 martian 源地址接受检查
+//     会采用各接口设置与 "all" 设置中更严格的那个（对 rp_filter 而言取
+//     最大值；对 accept_local 而言，实际上要求特定接口的值与 "all" 的值
+//     都允许才行）。只设置 net.ipv4.conf.lo.accept_local=1 而不同时设置
+//     net.ipv4.conf.all.accept_local=1，会悄无声息地导致真实入站路径上的
+//     CONNMARK --save-mark 实际上无法给 conntrack 条目打标记（该规则的数据包
+//     计数器仍会递增——TPROXY 是终结型目标，等到 CONNMARK 运行时，连接跟踪
+//     条目的分类已经在更严格的策略下被最终确定为“源地址无效，无法设置
+//     标记”）。对这三个 sysctl 中的每一个，始终同时设置 "all" 和特定接口。
 func requiredSysctls(ingressIface string) []SysctlSetting {
 	settings := []SysctlSetting{
 		{"net.ipv4.conf.lo.route_localnet", "1"},
@@ -88,15 +80,14 @@ func requiredSysctls(ingressIface string) []SysctlSetting {
 	return settings
 }
 
-// SysctlSnapshot captures the pre-existing value of every sysctl we are
-// about to change, so the uninstaller / rollback path can restore the
-// system to exactly how it was found, rather than guessing at defaults.
-// This is persisted to disk (see Manager.snapshotPath) so it survives
-// across Client restarts between install and uninstall.
+// SysctlSnapshot 记录我们即将修改的每个 sysctl 原有的值，使卸载/回滚路径
+// 能够把系统精确恢复到最初的状态，而不是去猜测默认值。它会被持久化到磁盘
+// （参见 Manager.snapshotPath），因此即使 Client 在安装与卸载之间重启也能
+// 保留下来。
 type SysctlSnapshot map[string]string
 
-// CaptureSysctlSnapshot reads the current value of every sysctl that
-// ApplySysctls is about to touch, without modifying anything.
+// CaptureSysctlSnapshot 读取 ApplySysctls 即将修改的每个 sysctl 的当前值，
+// 不做任何修改。
 func CaptureSysctlSnapshot(ingressIface string) (SysctlSnapshot, error) {
 	snap := make(SysctlSnapshot)
 	for _, s := range requiredSysctls(ingressIface) {
@@ -112,8 +103,8 @@ func CaptureSysctlSnapshot(ingressIface string) (SysctlSnapshot, error) {
 	return snap, nil
 }
 
-// ApplySysctls sets every required sysctl to the value TPROXY needs.
-// Call CaptureSysctlSnapshot first if you need to be able to restore later.
+// ApplySysctls 将每个所需的 sysctl 设置为 TPROXY 需要的值。
+// 如果之后需要能够恢复，请先调用 CaptureSysctlSnapshot。
 func ApplySysctls(ingressIface string) error {
 	for _, s := range requiredSysctls(ingressIface) {
 		if err := writeSysctl(s.Name, s.Value); err != nil {
@@ -123,7 +114,7 @@ func ApplySysctls(ingressIface string) error {
 	return nil
 }
 
-// RestoreSysctls writes back every value captured in snap.
+// RestoreSysctls 写回 snap 中记录的每个值。
 func RestoreSysctls(snap SysctlSnapshot) error {
 	var firstErr error
 	for name, value := range snap {
@@ -134,10 +125,9 @@ func RestoreSysctls(snap SysctlSnapshot) error {
 	return firstErr
 }
 
-// DefaultIngressInterface attempts to guess the network interface that
-// carries inbound internet traffic, by inspecting the default route. This
-// is used as a sensible default for the install script; users can override
-// it in the config if their setup is unusual (e.g. multiple WAN interfaces).
+// DefaultIngressInterface 通过检查默认路由，尝试推测承载入站互联网流量的
+// 网络接口。它被用作安装脚本的合理默认值；如果用户的环境比较特殊（例如有
+// 多个 WAN 接口），可以在配置中覆盖它。
 func DefaultIngressInterface() (string, error) {
 	data, err := os.ReadFile("/proc/net/route")
 	if err != nil {
@@ -150,15 +140,14 @@ func DefaultIngressInterface() (string, error) {
 			continue
 		}
 		iface, destination := fields[0], fields[1]
-		if destination == "00000000" { // default route destination is 0.0.0.0
+		if destination == "00000000" { // 默认路由的目标地址为 0.0.0.0
 			return iface, nil
 		}
 	}
 	return "", fmt.Errorf("tproxy: could not determine default route interface")
 }
 
-// snapshotFilePath returns where the sysctl snapshot for a given state
-// directory is stored on disk.
+// snapshotFilePath 返回给定状态目录对应的 sysctl 快照在磁盘上的存储路径。
 func snapshotFilePath(stateDir string) string {
 	return filepath.Join(stateDir, "sysctl-snapshot.json")
 }

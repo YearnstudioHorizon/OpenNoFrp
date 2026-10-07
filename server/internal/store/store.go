@@ -1,19 +1,15 @@
-// Package store is the single source of truth for everything the OpenNoFrp
-// Server and its embedded panel need to persist: the panel admin account,
-// registered Clients (internal machines running opennofrp-client) and their
-// permanent credentials, one-time registration tokens, and forwarding
-// rules.
+// Package store 是 OpenNoFrp Server 及其内嵌面板所有需要持久化数据的唯一
+// 可信来源：面板管理员账户、已注册的 Client（运行 opennofrp-client 的内网
+// 机器）及其永久凭据、一次性注册令牌，以及转发规则。
 //
-// This replaces the original design where a Client's proxy rules lived in
-// its own local TOML file and the Server merely validated a port range.
-// Now the Server (via the panel) is the sole authority over which ports
-// exist and whether they're currently enabled -- see
-// docs/03-product-design.md.
+// 这取代了最初的设计：原先 Client 的代理规则存放在其本地 TOML 文件中，
+// Server 只负责校验端口范围。现在 Server（通过面板）是决定哪些端口存在、
+// 以及它们当前是否启用的唯一权威——参见 docs/03-product-design.md。
 //
-// Uses modernc.org/sqlite, a CGO-free pure-Go SQLite driver, so the Server
-// binary stays a single static executable with no C toolchain/shared
-// library dependency at build or deploy time (important for the
-// cross-compile-on-Windows-deploy-to-Linux-VM workflow this project uses).
+// 使用 modernc.org/sqlite，一个无需 CGO 的纯 Go SQLite 驱动，因此 Server
+// 二进制在构建和部署时始终是单个静态可执行文件，不依赖 C 工具链或共享库
+// （这对本项目所采用的“在 Windows 上交叉编译、部署到 Linux 虚拟机”的
+// 工作流非常重要）。
 package store
 
 import (
@@ -30,26 +26,23 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Store wraps the SQLite database handle. All methods are safe for
-// concurrent use (SQLite itself serializes writers; reads use WAL mode so
-// they don't block on writers).
+// Store 封装 SQLite 数据库句柄。所有方法均可安全地并发使用（SQLite 本身会
+// 串行化写操作；读操作使用 WAL 模式，因此不会被写操作阻塞）。
 type Store struct {
 	db *sql.DB
 }
 
-// Open opens (creating if necessary) the SQLite database at path and
-// ensures the schema exists.
+// Open 打开位于 path 的 SQLite 数据库（必要时创建），并确保 schema 已存在。
 func Open(path string) (*Store, error) {
-	// _pragma params configure WAL mode (readers don't block writers, and
-	// vice versa for the single-writer case this low-traffic control-plane
-	// database always is) and a busy timeout (so a brief lock contention
-	// retries instead of immediately erroring).
+	// _pragma 参数配置 WAL 模式（读不阻塞写，写也不阻塞读——这个低流量的
+	// 控制面数据库始终处于单写者场景）以及 busy timeout（使短暂的锁竞争会
+	// 重试，而不是立即报错）。
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
-	db.SetMaxOpenConns(1) // modernc.org/sqlite + WAL: one connection avoids "database is locked" under concurrent goroutines
+	db.SetMaxOpenConns(1) // modernc.org/sqlite + WAL：使用单个连接，避免并发 goroutine 下出现 "database is locked"
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -116,11 +109,10 @@ CREATE TABLE IF NOT EXISTS reserved_ports (
 	return nil
 }
 
-// migrateRulesDualStack rebuilds the rules table of databases created before
-// dual-stack ("tcp+udp") rules existed. SQLite cannot alter a CHECK
-// constraint in place, so the table is copied into a new one with the
-// widened constraint. Idempotent: does nothing once the constraint already
-// mentions 'tcp+udp'.
+// migrateRulesDualStack 重建在双栈（"tcp+udp"）规则出现之前创建的数据库中
+// 的 rules 表。SQLite 无法原地修改 CHECK 约束，因此会将该表复制到一个
+// 约束已放宽的新表中。该操作是幂等的：一旦约束中已包含 'tcp+udp'，便不做
+// 任何事。
 func (s *Store) migrateRulesDualStack() error {
 	var ddl string
 	if err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rules'`).Scan(&ddl); err != nil {
@@ -159,11 +151,10 @@ ALTER TABLE rules_new RENAME TO rules;
 	return tx.Commit()
 }
 
-// --- Admin account -------------------------------------------------------
+// --- 管理员账户 -------------------------------------------------------
 
-// AdminExists reports whether the single admin account has been created
-// yet (first-run detection: the Server prints/writes an initial random
-// password the first time it starts with no admin row present).
+// AdminExists 报告唯一的管理员账户是否已创建（首次运行检测：当 Server
+// 首次启动且不存在管理员记录时，会打印/写入一个初始随机密码）。
 func (s *Store) AdminExists(ctx context.Context) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin WHERE id = 1`).Scan(&n)
@@ -173,8 +164,8 @@ func (s *Store) AdminExists(ctx context.Context) (bool, error) {
 	return n > 0, nil
 }
 
-// CreateAdmin sets the single admin account's initial username/password.
-// Fails if an admin already exists (use SetAdminPassword to change it).
+// CreateAdmin 设置唯一管理员账户的初始用户名/密码。
+// 若管理员已存在则失败（修改密码请使用 SetAdminPassword）。
 func (s *Store) CreateAdmin(ctx context.Context, username, password string) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -189,8 +180,8 @@ func (s *Store) CreateAdmin(ctx context.Context, username, password string) erro
 	return nil
 }
 
-// dummyBcryptHash 是一个预先计算好的标准 bcrypt hash (cost 10)，
-// 用于在用户名不存在时执行等耗时的 dummy 比对，消除时序侧信道枚举漏洞 (Timing Attack)。
+// dummyBcryptHash 是一个预先计算好的标准 bcrypt 哈希 (cost 10)，
+// 用于在用户名不存在时执行等耗时的虚拟比对，消除时序侧信道枚举漏洞（时序攻击）。
 const dummyBcryptHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 
 // VerifyAdmin 校验管理员账密。
@@ -211,7 +202,7 @@ func (s *Store) VerifyAdmin(ctx context.Context, username, password string) (boo
 		targetHash = dummyBcryptHash
 	}
 
-	// 恒定执行一次密码 Hash 校验
+	// 恒定执行一次密码哈希校验
 	compErr := bcrypt.CompareHashAndPassword([]byte(targetHash), []byte(password))
 
 	if !isMatchUser || compErr != nil {
@@ -233,7 +224,7 @@ func (s *Store) SetAdminPasswordWithOld(ctx context.Context, oldPassword, newPas
 		return false, nil // 旧密码错误
 	}
 
-	// 生成新密码 Hash 并更新
+	// 生成新密码哈希并更新
 	newHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
 		return false, fmt.Errorf("store: hash new password: %w", err)
@@ -245,8 +236,7 @@ func (s *Store) SetAdminPasswordWithOld(ctx context.Context, oldPassword, newPas
 	return true, nil
 }
 
-// SetAdminPassword changes the admin password (used by the panel's "change
-// password" page).
+// SetAdminPassword 修改管理员密码（供面板的“修改密码”页面使用）。
 func (s *Store) SetAdminPassword(ctx context.Context, newPassword string) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
@@ -277,11 +267,11 @@ func (s *Store) CheckRegisterTokenValid(ctx context.Context, token string) (bool
 	return true, nil
 }
 
-// --- Register tokens -------------------------------------------------------
+// --- 注册令牌 -------------------------------------------------------
 
-// RegisterToken is a one-time-use credential embedded in the panel's
-// generated one-line install command. A Client exchanges it exactly once
-// for a permanent ClientID/ClientSecret pair via RegisterRequest.
+// RegisterToken 是一种一次性凭据，嵌入在面板生成的单行安装命令中。Client
+// 通过 RegisterRequest 用它换取一对永久的 ClientID/ClientSecret，且仅能
+// 兑换一次。
 type RegisterToken struct {
 	Token     string
 	Label     string
@@ -289,9 +279,9 @@ type RegisterToken struct {
 	ExpiresAt time.Time
 }
 
-// CreateRegisterToken generates a new random, time-limited registration
-// token. label is a human-friendly hint shown in the panel (e.g. "office
-// NAS", filled in by the admin when clicking "add internal server").
+// CreateRegisterToken 生成一个新的随机、限时注册令牌。label 是在面板中
+// 显示的便于识别的提示（例如“办公室 NAS”，由管理员点击“添加内网服务器”
+// 时填写）。
 func (s *Store) CreateRegisterToken(ctx context.Context, label string, ttl time.Duration) (RegisterToken, error) {
 	tok, err := randomHex(24)
 	if err != nil {
@@ -308,11 +298,10 @@ func (s *Store) CreateRegisterToken(ctx context.Context, label string, ttl time.
 	return RegisterToken{Token: tok, Label: label, CreatedAt: now, ExpiresAt: exp}, nil
 }
 
-// ConsumeRegisterToken atomically validates and marks a registration token
-// used, returning an error if it does not exist, is expired, or was
-// already consumed. This must be called within the same transaction/flow
-// that mints the new Client's credentials so a token can never be
-// redeemed twice even under concurrent registration attempts.
+// ConsumeRegisterToken 以原子方式校验注册令牌并将其标记为已使用；若令牌
+// 不存在、已过期或已被消费，则返回错误。必须在为新 Client 签发凭据的同一
+// 事务/流程中调用此方法，这样即使存在并发注册尝试，令牌也绝不会被兑换
+// 两次。
 func (s *Store) ConsumeRegisterToken(ctx context.Context, token, byClientID string) (label string, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -349,9 +338,9 @@ func (s *Store) ConsumeRegisterToken(ctx context.Context, token, byClientID stri
 	return label, nil
 }
 
-// --- Clients -------------------------------------------------------------
+// --- 客户端 -------------------------------------------------------------
 
-// Client is a registered opennofrp-client instance.
+// Client 是一个已注册的 opennofrp-client 实例。
 type Client struct {
 	ID           string
 	Name         string
@@ -360,12 +349,11 @@ type Client struct {
 	LastSeenAddr string
 }
 
-// CreateClient mints a brand-new Client identity with a random ID and
-// secret. The plaintext secret is returned once (to be sent back in
-// RegisterResponse) and only its bcrypt hash is persisted -- the Server
-// itself cannot recover a lost Client secret, matching the operator-facing
-// behavior of "if you lose it, re-run the registration flow for a new
-// identity" rather than storing a recoverable shared secret.
+// CreateClient 签发一个全新的 Client 身份，带有随机 ID 和密钥。明文密钥
+// 只返回一次（随 RegisterResponse 回传），持久化的仅是其 bcrypt 哈希——
+// Server 自身无法恢复丢失的 Client 密钥，这与面向运维者的行为一致：
+// “如果丢失，就重新执行注册流程以获取新身份”，而不是存储一个可恢复的
+// 共享密钥。
 func (s *Store) CreateClient(ctx context.Context, name string) (id, secret string, err error) {
 	id, err = randomHex(8)
 	if err != nil {
@@ -388,8 +376,7 @@ func (s *Store) CreateClient(ctx context.Context, name string) (id, secret strin
 	return id, secret, nil
 }
 
-// VerifyClient checks a ClientID/ClientSecret pair presented in
-// HandshakeRequest.
+// VerifyClient 校验 HandshakeRequest 中提供的 ClientID/ClientSecret 对。
 func (s *Store) VerifyClient(ctx context.Context, id, secret string) (bool, error) {
 	var hash string
 	err := s.db.QueryRowContext(ctx, `SELECT secret_hash FROM clients WHERE id = ?`, id).Scan(&hash)
@@ -405,8 +392,8 @@ func (s *Store) VerifyClient(ctx context.Context, id, secret string) (bool, erro
 	return true, nil
 }
 
-// TouchClient records that a Client just completed a successful handshake,
-// for display in the panel ("last seen").
+// TouchClient 记录某个 Client 刚刚完成了一次成功握手，用于在面板中显示
+// （“最后在线”）。
 func (s *Store) TouchClient(ctx context.Context, id, remoteAddr string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE clients SET last_seen_at = ?, last_seen_addr = ? WHERE id = ?`,
@@ -417,8 +404,7 @@ func (s *Store) TouchClient(ctx context.Context, id, remoteAddr string) error {
 	return nil
 }
 
-// ListClients returns every registered Client, for the panel's Client list
-// page.
+// ListClients 返回所有已注册的 Client，供面板的 Client 列表页面使用。
 func (s *Store) ListClients(ctx context.Context) ([]Client, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, name, created_at, last_seen_at, last_seen_addr FROM clients ORDER BY created_at DESC`)
 	if err != nil {
@@ -442,7 +428,7 @@ func (s *Store) ListClients(ctx context.Context) ([]Client, error) {
 	return out, rows.Err()
 }
 
-// GetClient returns a single Client by ID, or sql.ErrNoRows if not found.
+// GetClient 按 ID 返回单个 Client；若未找到则返回 sql.ErrNoRows。
 func (s *Store) GetClient(ctx context.Context, id string) (Client, error) {
 	var c Client
 	var createdAt, lastSeenAt int64
@@ -459,9 +445,8 @@ func (s *Store) GetClient(ctx context.Context, id string) (Client, error) {
 	return c, nil
 }
 
-// DeleteClient removes a Client and (via ON DELETE CASCADE) all of its
-// rules. Does not affect any currently-open network connection; the
-// caller is responsible for also disconnecting the live session, if any.
+// DeleteClient 删除一个 Client 及其所有规则（通过 ON DELETE CASCADE）。
+// 不会影响任何当前已打开的网络连接；如有在线会话，调用方需负责同时断开它。
 func (s *Store) DeleteClient(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM clients WHERE id = ?`, id)
 	if err != nil {
@@ -470,7 +455,7 @@ func (s *Store) DeleteClient(ctx context.Context, id string) error {
 	return nil
 }
 
-// RenameClient updates a Client's display name.
+// RenameClient 更新 Client 的显示名称。
 func (s *Store) RenameClient(ctx context.Context, id, name string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE clients SET name = ? WHERE id = ?`, name, id)
 	if err != nil {
@@ -479,16 +464,16 @@ func (s *Store) RenameClient(ctx context.Context, id, name string) error {
 	return nil
 }
 
-// --- Rules -----------------------------------------------------------------
+// --- 规则 -----------------------------------------------------------------
 
-// Rule is one forwarding rule, as stored. Mirrors protocol.Rule but is the
-// persisted form (includes ClientID, Enabled, CreatedAt which are not part
-// of the wire message sent to the owning Client).
+// Rule 是一条已存储的转发规则。它与 protocol.Rule 相对应，但属于持久化
+// 形式（包含 ClientID、Enabled、CreatedAt，这些字段不属于发送给所属
+// Client 的线上消息）。
 type Rule struct {
 	ID               int64
 	ClientID         string
 	Name             string
-	Protocol         string // "tcp" or "udp"
+	Protocol         string // "tcp" 或 "udp"
 	LocalIP          string
 	LocalPort        uint16
 	RemotePort       uint16
@@ -497,11 +482,10 @@ type Rule struct {
 	CreatedAt        time.Time
 }
 
-// CreateRule adds a new rule for a Client. It is created disabled by
-// default (enabled=false) UNLESS enabled is explicitly passed true -- the
-// panel's "add rule" form has an explicit "enable immediately" checkbox so
-// operators can stage a rule (e.g. while the internal service isn't up
-// yet) without it taking effect.
+// CreateRule 为某个 Client 添加一条新规则。默认以禁用状态创建
+// （enabled=false），除非显式传入 enabled 为 true——面板的“添加规则”表单
+// 有一个明确的“立即启用”复选框，以便运维者可以预先配置一条规则（例如在
+// 内网服务尚未启动时）而不让其生效。
 func (s *Store) CreateRule(ctx context.Context, r Rule) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO rules (client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at)
@@ -513,9 +497,8 @@ func (s *Store) CreateRule(ctx context.Context, r Rule) (int64, error) {
 	return res.LastInsertId()
 }
 
-// UpdateRule overwrites an existing rule's mutable fields (not ClientID,
-// which is immutable after creation -- to move a rule to a different
-// Client, delete and recreate it).
+// UpdateRule 覆盖现有规则的可变字段（不包括 ClientID，它在创建后不可变——
+// 若要将规则移到另一个 Client，请删除后重新创建）。
 func (s *Store) UpdateRule(ctx context.Context, r Rule) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE rules SET name = ?, protocol = ?, local_ip = ?, local_port = ?, remote_port = ?, preserve_source_ip = ?, enabled = ?
@@ -527,9 +510,8 @@ func (s *Store) UpdateRule(ctx context.Context, r Rule) error {
 	return nil
 }
 
-// SetRuleEnabled is the dedicated fast-path for the panel's on/off toggle
-// button -- flips exactly one column without requiring the caller to
-// re-submit every other field.
+// SetRuleEnabled 是面板开关按钮专用的快速路径——只切换一列，调用方无需
+// 重新提交其他所有字段。
 func (s *Store) SetRuleEnabled(ctx context.Context, id int64, enabled bool) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE rules SET enabled = ? WHERE id = ?`, boolToInt(enabled), id)
 	if err != nil {
@@ -538,7 +520,7 @@ func (s *Store) SetRuleEnabled(ctx context.Context, id int64, enabled bool) erro
 	return nil
 }
 
-// DeleteRule removes a rule permanently.
+// DeleteRule 永久删除一条规则。
 func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM rules WHERE id = ?`, id)
 	if err != nil {
@@ -547,15 +529,15 @@ func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 	return nil
 }
 
-// GetRule returns a single rule by ID.
+// GetRule 按 ID 返回单条规则。
 func (s *Store) GetRule(ctx context.Context, id int64) (Rule, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at FROM rules WHERE id = ?`, id)
 	return scanRule(row)
 }
 
-// ListRulesForClient returns every rule (enabled or not) belonging to a
-// Client, for the panel's per-Client rule management page.
+// ListRulesForClient 返回属于某个 Client 的所有规则（无论是否启用），供
+// 面板中按 Client 划分的规则管理页面使用。
 func (s *Store) ListRulesForClient(ctx context.Context, clientID string) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at
@@ -567,10 +549,9 @@ func (s *Store) ListRulesForClient(ctx context.Context, clientID string) ([]Rule
 	return scanRules(rows)
 }
 
-// ListEnabledRulesForClient returns only the currently-enabled rules for a
-// Client. This is exactly the set the Server pushes to that Client as a
-// RulesSnapshot, and the set listener.Manager should have open public
-// listeners for.
+// ListEnabledRulesForClient 仅返回某个 Client 当前已启用的规则。这正是
+// Server 以 RulesSnapshot 形式推送给该 Client 的集合，也是
+// listener.Manager 应为其打开公网监听器的集合。
 func (s *Store) ListEnabledRulesForClient(ctx context.Context, clientID string) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at
@@ -582,11 +563,10 @@ func (s *Store) ListEnabledRulesForClient(ctx context.Context, clientID string) 
 	return scanRules(rows)
 }
 
-// ListAllEnabledRules returns every enabled rule across all Clients. Used
-// at Server startup to re-open every public listener that should already
-// be active (e.g. after a Server restart, before any Client has even
-// reconnected yet) -- see docs/03-product-design.md for why listeners are
-// driven by the database rather than only by live Client handshakes.
+// ListAllEnabledRules 返回所有 Client 的全部已启用规则。在 Server 启动时
+// 使用，用于重新打开所有本应处于活动状态的公网监听器（例如在 Server 重启
+// 后、尚无任何 Client 重新连接之前）——关于为什么监听器由数据库驱动，而
+// 不仅仅由在线 Client 的握手驱动，参见 docs/03-product-design.md。
 func (s *Store) ListAllEnabledRules(ctx context.Context) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at
@@ -598,10 +578,9 @@ func (s *Store) ListAllEnabledRules(ctx context.Context) ([]Rule, error) {
 	return scanRules(rows)
 }
 
-// RemotePortInUse reports whether remotePort is already assigned to any
-// rule other than excludeRuleID (pass 0 when creating a new rule). Used by
-// the panel to give a friendly "port already in use" validation error
-// instead of relying solely on the UNIQUE constraint's raw SQL error.
+// RemotePortInUse 报告 remotePort 是否已被除 excludeRuleID 之外的任何规则
+// 占用（创建新规则时传 0）。面板用它给出友好的“端口已被占用”校验错误，
+// 而不是仅依赖 UNIQUE 约束产生的原始 SQL 错误。
 func (s *Store) RemotePortInUse(ctx context.Context, remotePort uint16, excludeRuleID int64) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
@@ -644,16 +623,14 @@ func scanRules(rows *sql.Rows) ([]Rule, error) {
 	return out, rows.Err()
 }
 
-// --- Reserved ports ----------------------------------------------------
+// --- 保留端口 ----------------------------------------------------
 
-// ReservedPorts returns the set of ports the operator (or the installer,
-// auto-detecting the current SSH port) has marked as off-limits to the
-// panel. CreateRule/UpdateRule callers must check this before accepting a
-// remote_port -- see docs/03-product-design.md "soft default-deny" design:
-// the Server never opens a reserved port no matter what the panel/API is
-// asked to do, which is the safety net against an admin fat-fingering a
-// rule that collides with SSH or another already-running service on the
-// cloud box.
+// ReservedPorts 返回运维者（或安装程序，它会自动检测当前 SSH 端口）标记为
+// 面板禁止使用的端口集合。CreateRule/UpdateRule 的调用方在接受
+// remote_port 之前必须检查此集合——参见 docs/03-product-design.md 中的
+// “软性默认拒绝”设计：无论面板/API 收到什么请求，Server 都绝不会打开保留
+// 端口，这是防止管理员误操作、创建与 SSH 或云主机上其他已运行服务冲突的
+// 规则的安全网。
 func (s *Store) ReservedPorts(ctx context.Context) (map[uint16]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT port, reason FROM reserved_ports`)
 	if err != nil {
@@ -672,8 +649,8 @@ func (s *Store) ReservedPorts(ctx context.Context) (map[uint16]string, error) {
 	return out, rows.Err()
 }
 
-// AddReservedPort marks a port as reserved (never forwardable via a rule).
-// Idempotent: re-adding the same port just updates its reason.
+// AddReservedPort 将一个端口标记为保留（永远不能通过规则转发）。
+// 幂等：重复添加同一端口只会更新其原因。
 func (s *Store) AddReservedPort(ctx context.Context, port uint16, reason string) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO reserved_ports (port, reason) VALUES (?, ?) ON CONFLICT(port) DO UPDATE SET reason = excluded.reason`,
@@ -684,8 +661,8 @@ func (s *Store) AddReservedPort(ctx context.Context, port uint16, reason string)
 	return nil
 }
 
-// RemoveReservedPort un-reserves a port (panel operator override, for the
-// rare case the auto-detected reservation was wrong).
+// RemoveReservedPort 取消某个端口的保留（面板运维者的手动覆盖，用于自动
+// 检测出的保留有误的少数情况）。
 func (s *Store) RemoveReservedPort(ctx context.Context, port uint16) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM reserved_ports WHERE port = ?`, port)
 	if err != nil {
@@ -694,7 +671,7 @@ func (s *Store) RemoveReservedPort(ctx context.Context, port uint16) error {
 	return nil
 }
 
-// --- helpers ---------------------------------------------------------------
+// --- 辅助函数 ---------------------------------------------------------------
 
 func boolToInt(b bool) int {
 	if b {

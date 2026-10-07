@@ -1,15 +1,15 @@
 #!/bin/bash
-# OpenNoFrp Server uninstaller (Linux, cloud machine).
+# OpenNoFrp 服务端卸载脚本 (Linux，云服务器)。
 #
-# Whitelist-only removal, per docs/02-risk-assessment.md section 5:
-#   - stops + disables opennofrp-server.service
-#   - removes exactly: /etc/systemd/system/opennofrp-server.service,
+# 仅按白名单删除，依据 docs/02-risk-assessment.md 第 5 节：
+#   - 停止并禁用 opennofrp-server.service
+#   - 仅删除以下内容：/etc/systemd/system/opennofrp-server.service、
 #     /opt/opennofrp/
-#   - does NOT remove /etc/opennofrp/server.toml by default (pass
-#     --purge-config to also remove it)
-#   - does NOT remove the 'opennofrp' system user by default (pass
-#     --remove-user if you're sure nothing else depends on it)
-#   - never touches iptables/nftables/routing (the Server never created any)
+#   - 默认不删除 /etc/opennofrp/server.toml（传入
+#     --purge-config 可一并删除）
+#   - 默认不删除 'opennofrp' 系统用户（若确定没有其他程序依赖它，
+#     可传入 --remove-user）
+#   - 绝不触碰 iptables/nftables/路由（Server 从未创建过任何此类规则）
 
 set -euo pipefail
 

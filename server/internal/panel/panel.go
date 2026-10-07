@@ -1,9 +1,7 @@
-// Package panel implements the embedded web administration UI of the
-// OpenNoFrp Server. It is served by the same binary (same process, same
-// port namespace as the control listener but on its own port) and shares
-// the same SQLite store. Everything that mutates rules also notifies the
-// Server core via OnRulesChanged so public listeners and connected Clients
-// can be reconciled immediately.
+// Package panel 实现了 OpenNoFrp Server 内嵌的 Web 管理界面。它由同一个
+// 二进制程序提供服务（与控制监听器同进程、同端口命名空间，但使用独立端口），
+// 并共享同一个 SQLite 存储。所有会修改规则的操作都会通过 OnRulesChanged
+// 通知 Server 核心，以便立即对公网监听器和已连接的 Client 进行同步调整。
 package panel
 
 import (
@@ -33,8 +31,8 @@ import (
 //go:embed templates static
 var templateFS embed.FS
 
-// OnRulesChanged is called after any panel mutation that can change which
-// public listeners or which rule-set should be live for a Client.
+// OnRulesChanged 在任何可能改变公网监听器集合、或改变某个 Client 应生效的
+// 规则集的面板变更操作之后被调用。
 type OnRulesChanged func()
 
 type loginAttempt struct {
@@ -47,16 +45,16 @@ type Panel struct {
 	Logger  *slog.Logger
 	OnRules OnRulesChanged
 
-	// BaseURL is how the panel reaches itself from the internet (e.g.
-	// "http://1.2.3.4:8080"); falls back to the request's Host header.
+	// BaseURL 是从互联网访问面板自身的地址（例如
+	// "http://1.2.3.4:8080"）；为空时回退为请求的 Host 标头。
 	BaseURL string
-	// ControlHost/ControlPort identify the control endpoint the client
-	// will dial; rendered into the install command/script.
+	// ControlHost/ControlPort 标识客户端将要连接的控制端点；会被渲染进
+	// 安装命令/脚本中。
 	ControlHost string
 	ControlPort int
-	// Fingerprint is the SHA-256 fingerprint of the server's TLS certificate.
+	// Fingerprint 是服务端 TLS 证书的 SHA-256 指纹。
 	Fingerprint string
-	// ClientBinDir serves /dl/opennofrp-client-<os>-<arch>
+	// ClientBinDir 用于提供 /dl/opennofrp-client-<os>-<arch> 下载
 	ClientBinDir string
 
 	tmpl *template.Template
@@ -77,7 +75,7 @@ func New(st *store.Store, logger *slog.Logger, onRules OnRulesChanged, baseURL, 
 	}
 }
 
-// Handler returns the root http.Handler for the panel.
+// Handler 返回面板的根 http.Handler。
 func (p *Panel) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /login", p.handleLoginGet)
@@ -113,7 +111,7 @@ func (p *Panel) Handler() http.Handler {
 	return mux
 }
 
-// ---- auth -----------------------------------------------------------------
+// ---- 认证 -----------------------------------------------------------------
 
 func (p *Panel) authed(r *http.Request) bool {
 	c, err := r.Cookie("onfr_session")
@@ -209,7 +207,7 @@ func (p *Panel) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-// ---- dashboard --------------------------------------------------------------
+// ---- 仪表盘 --------------------------------------------------------------
 
 type clientRow struct {
 	ID        string
@@ -318,7 +316,7 @@ func (p *Panel) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ---- client page ----------------------------------------------------------
+// ---- 客户端页面 ----------------------------------------------------------
 
 func (p *Panel) handleClientPage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -523,11 +521,11 @@ func (p *Panel) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Panel) handleDownload(w http.ResponseWriter, r *http.Request) {
-	name := path.Base(r.PathValue("name")) // guard against traversal
+	name := path.Base(r.PathValue("name")) // 防止路径穿越
 	http.ServeFile(w, r, p.ClientBinDir+"/"+name)
 }
 
-// ---- helpers -------------------------------------------------------------
+// ---- 辅助函数 -------------------------------------------------------------
 
 func (p *Panel) rulesChanged() {
 	if p.OnRules != nil {

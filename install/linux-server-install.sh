@@ -76,7 +76,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 # 缓存获取到的最新发布标签
 LATEST_TAG=""
 
-# safe_curl 封装高可靠网络请求：优先使用 IPv4 (-4) 规避国内部分双栈网络下 IPv6 路由黑洞导致的 SSL connection timeout
+# safe_curl 封装高可靠网络请求：优先使用 IPv4 (-4) 规避国内部分双栈网络下 IPv6 路由黑洞导致的 SSL 连接超时 (SSL connection timeout)
 safe_curl_get() {
   local url="$1"
   local timeout="${2:-10}"

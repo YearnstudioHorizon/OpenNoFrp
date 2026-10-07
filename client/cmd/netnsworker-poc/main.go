@@ -1,13 +1,11 @@
-// Command netnsworker-poc is a standalone proof-of-concept binary that
-// validates the netnsworker package's core claim: a Go program can use
-// setns(2) to enter a target Docker container's network namespace, set up
-// TPROXY rules and a spoofed-source-IP forwarder INSIDE that namespace
-// (targeting the namespace's own 127.0.0.1), and have external traffic
-// arriving via the container's normal "docker run -p" port mapping come out
-// the other end with the real external client's IP preserved -- all without
-// touching the container, its port mapping, or any host-level TPROXY rules.
+// Command netnsworker-poc 是一个独立的概念验证（PoC）二进制程序，用于
+// 验证 netnsworker 包的核心论断：Go 程序可以通过 setns(2) 进入目标 Docker
+// 容器的网络命名空间，在该命名空间内部（以该命名空间自身的 127.0.0.1 为目标）
+// 设置 TPROXY 规则和伪造源 IP 的转发器，使经由容器常规的 "docker run -p"
+// 端口映射到达的外部流量从另一端出来时仍保留真实外部客户端的 IP —— 全程
+// 无需改动容器、其端口映射或任何主机级 TPROXY 规则。
 //
-// Usage: netnsworker-poc <container-pid> <port> <fwmark>
+// 用法：netnsworker-poc <container-pid> <port> <fwmark>
 package main
 
 import (
@@ -54,9 +52,9 @@ func main() {
 		}
 		log.Printf("[netnsworker-poc] running inside container netns (pid=%d), ingress interface: %s", pid, iface)
 
-		// Apply the TPROXY mangle rules WITHIN this namespace (we are
-		// setns()'d in, so iptables-legacy here operates on this
-		// namespace's own tables, not the host's).
+		// 在此命名空间内部应用 TPROXY mangle 规则（我们已通过 setns()
+		// 进入，因此这里的 iptables-legacy 操作的是该命名空间自己的表，
+		// 而不是主机的表）。
 		spec := tproxy.RuleSpec{
 			PublicPort:   targetPort,
 			IngressIface: iface,
@@ -85,11 +83,10 @@ func main() {
 	}
 }
 
-// runForwarder listens on the TPROXY redirect port (inside the container's
-// netns, since we're already setns()'d in by the time this runs) and
-// forwards each connection to 127.0.0.1:targetPort within that SAME
-// namespace, using IP_TRANSPARENT + SO_MARK to spoof the source IP back to
-// the original external client's address.
+// runForwarder 在 TPROXY 重定向端口上监听（位于容器的 netns 内，因为运行到
+// 这里时我们已经通过 setns() 进入），并将每个连接转发到同一命名空间内的
+// 127.0.0.1:targetPort，借助 IP_TRANSPARENT + SO_MARK 将源 IP 伪造为原始
+// 外部客户端的地址。
 func runForwarder(cns netnsworker.ContainerNetns, spec tproxy.RuleSpec, targetPort uint16) error {
 	lc := net.ListenConfig{Control: controlSetTransparent}
 	ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf("0.0.0.0:%d", spec.ListenPort))
@@ -106,27 +103,21 @@ func runForwarder(cns netnsworker.ContainerNetns, spec tproxy.RuleSpec, targetPo
 			log.Printf("[netnsworker-poc] accept error: %v", err)
 			continue
 		}
-		// CRITICAL: do NOT spawn a bare "go handleConn(...)" here. This
-		// goroutine must ALSO run on an OS thread that is setns()'d into
-		// the target container's network namespace, because the upstream
-		// socket() call inside handleConn (via DialSpoofed) creates a brand
-		// new file descriptor, and a new fd's network namespace is
-		// determined by whichever OS thread's netns is active AT THE TIME
-		// unix.Socket() is called -- not by which goroutine logically
-		// "belongs" to this accept loop. Go's scheduler is free to run an
-		// unlocked goroutine on ANY OS thread, including ones still sitting
-		// in the host's root namespace, which is exactly what happened
-		// during initial PoC testing: the TPROXY listener worked fine (its
-		// socket was created once, synchronously, on the correctly-locked
-		// thread during setup), but every per-connection upstream dial
-		// silently created its socket in the HOST namespace instead,
-		// connecting to the host's own (service-less) 127.0.0.1:9999 and
-		// timing out. nsenter-based (Python) testing never hit this because
-		// nsenter uses execve(), which carries the namespace to literally
-		// every thread of the resulting process -- there's no "escape onto
-		// an unlocked thread" possible there. Go's goroutine model has no
-		// such blanket guarantee, so each connection handler must
-		// independently re-pin itself.
+		// 关键：此处切勿直接启动裸的 "go handleConn(...)"。该 goroutine
+		// 同样必须运行在已通过 setns() 进入目标容器网络命名空间的 OS 线程上，
+		// 因为 handleConn 内部（经由 DialSpoofed）的上游 socket() 调用会创建
+		// 一个全新的文件描述符，而新 fd 所属的网络命名空间取决于调用
+		// unix.Socket() 那一刻所在 OS 线程当前生效的 netns —— 而不是该
+		// goroutine 在逻辑上"属于"哪个 accept 循环。Go 调度器可以把未锁定的
+		// goroutine 调度到任意 OS 线程上，包括仍处于主机根命名空间中的线程，
+		// 这正是最初 PoC 测试时发生的情况：TPROXY 监听器工作正常（其 socket
+		// 在初始化阶段于正确锁定的线程上同步创建了一次），但每个连接的上游
+		// 拨号却悄无声息地在主机命名空间中创建了 socket，连接到主机自身
+		// （没有服务的）127.0.0.1:9999 并超时。基于 nsenter 的（Python）测试
+		// 从未遇到这个问题，因为 nsenter 使用 execve()，它会把命名空间带到
+		// 生成进程的每一个线程上 —— 在那里根本不可能"逃逸到未锁定的线程"。
+		// Go 的 goroutine 模型没有这种全面的保证，因此每个连接处理函数都
+		// 必须各自重新固定自身。
 		go func(c net.Conn) {
 			if err := cns.Enter(); err != nil {
 				log.Printf("[netnsworker-poc] FATAL: per-connection netns Enter failed: %v", err)
@@ -182,11 +173,11 @@ func relay(a, b net.Conn) {
 	<-done
 }
 
-// controlSetTransparent sets IP_TRANSPARENT and SO_REUSEADDR on the
-// listening socket before bind(), so accept()ed connections report the
-// connection's ORIGINAL destination via getsockname() per TPROXY semantics.
-// (Duplicated here rather than imported from the forwarder package, to keep
-// this standalone PoC binary's dependency graph minimal and self-contained.)
+// controlSetTransparent 在 bind() 之前为监听 socket 设置 IP_TRANSPARENT 和
+// SO_REUSEADDR，使 accept() 得到的连接按照 TPROXY 语义通过 getsockname()
+// 报告该连接的原始目的地址。
+// （此处是复制而非从 forwarder 包导入，以保持这个独立 PoC 二进制程序的
+// 依赖图最小且自包含。）
 func controlSetTransparent(network, address string, c syscall.RawConn) error {
 	var sockErr error
 	err := c.Control(func(fd uintptr) {

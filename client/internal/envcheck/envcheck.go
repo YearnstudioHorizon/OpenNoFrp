@@ -1,14 +1,11 @@
-// Package envcheck probes the local Linux environment for everything the
-// TPROXY-based source-IP-preservation feature needs, and reports a clear,
-// actionable result instead of letting the feature fail mysteriously at
-// runtime.
+// Package envcheck 探测本地 Linux 环境是否满足基于 TPROXY 的源 IP 保留功能
+// 所需的全部条件，并给出清晰、可操作的结果，而不是让该功能在运行时莫名其妙地
+// 失败。
 //
-// Every check here corresponds to a concrete failure mode we hit while
-// validating the design in an isolated KVM sandbox (see
-// docs/01-architecture.md section 6). We encode those lessons as checks so
-// that a user running "opennofrp-client envcheck" gets told in advance
-// exactly what's missing, rather than discovering it through a silently
-// hanging connection.
+// 这里的每一项检查都对应我们在隔离的 KVM 沙箱中验证该设计时遇到过的一种具体
+// 故障模式（参见 docs/01-architecture.md 第 6 节）。我们把这些经验编码为检查项，
+// 这样运行 "opennofrp-client envcheck" 的用户就能提前确切得知缺少什么，而不是
+// 通过一个悄无声息挂起的连接才发现问题。
 package envcheck
 
 import (
@@ -20,18 +17,16 @@ import (
 	"strings"
 )
 
-// Severity classifies how serious a failed check is.
+// Severity 表示某项检查失败的严重程度。
 type Severity int
 
 const (
-	// SeverityFatal means preserve_source_ip cannot work at all until this
-	// is fixed.
+	// SeverityFatal 表示在修复此问题之前，preserve_source_ip 完全无法工作。
 	SeverityFatal Severity = iota
-	// SeverityWarning means the feature may work but with caveats (e.g. a
-	// sysctl needs to be set and the installer will try to set it
-	// automatically; if that fails, warn but keep going).
+	// SeverityWarning 表示该功能可能可以工作，但有附加条件（例如需要设置某个
+	// sysctl，安装程序会尝试自动设置；若设置失败，则发出警告但继续执行）。
 	SeverityWarning
-	// SeverityInfo is purely informational.
+	// SeverityInfo 仅用于提供信息。
 	SeverityInfo
 )
 
@@ -46,7 +41,7 @@ func (s Severity) String() string {
 	}
 }
 
-// CheckResult is one probe's outcome.
+// CheckResult 是单项探测的结果。
 type CheckResult struct {
 	Name     string
 	Severity Severity
@@ -55,12 +50,12 @@ type CheckResult struct {
 	FixHint  string
 }
 
-// Report aggregates all checks run against the host.
+// Report 汇总针对本机运行的所有检查。
 type Report struct {
 	Results []CheckResult
 }
 
-// OK returns true if no FATAL check failed.
+// OK 在没有任何 FATAL 级检查失败时返回 true。
 func (r Report) OK() bool {
 	for _, res := range r.Results {
 		if !res.Passed && res.Severity == SeverityFatal {
@@ -75,10 +70,9 @@ func (r Report) add(res CheckResult) Report {
 	return r
 }
 
-// RunAll executes every environment check and returns the aggregated report.
-// This does not modify the system in any way -- it is purely read-only
-// probing, safe to run repeatedly and safe to run before the user has
-// decided to proceed with installation.
+// RunAll 执行所有环境检查并返回汇总报告。
+// 它不会以任何方式修改系统——纯粹是只读探测，可以安全地重复运行，也可以在
+// 用户决定继续安装之前安全运行。
 func RunAll() Report {
 	var r Report
 	r = r.add(checkRunningAsRoot())
@@ -108,10 +102,9 @@ func checkRunningAsRoot() CheckResult {
 	}
 }
 
-// checkKernelModule verifies a kernel module is loaded, by checking
-// /proc/modules. It does NOT attempt to modprobe it -- that is a mutating
-// action left to the install script (with the user's explicit consent),
-// envcheck is read-only by design.
+// checkKernelModule 通过检查 /proc/modules 来确认某个内核模块已加载。它不会
+// 尝试对其执行 modprobe——那是一个会修改系统的操作，留给安装脚本（在用户明确
+// 同意的情况下）完成；envcheck 在设计上是只读的。
 func checkKernelModule(name string, fatal bool) CheckResult {
 	sev := SeverityWarning
 	if fatal {
@@ -139,11 +132,10 @@ func checkKernelModule(name string, fatal bool) CheckResult {
 		}
 	}
 
-	// Some of these modules can be built-in (not shown in /proc/modules) if
-	// the kernel was compiled with them as "=y" rather than "=m". Treat
-	// "not found in /proc/modules" as a soft signal and let the actual
-	// iptables rule application be the final arbiter; but still surface it
-	// so the user isn't surprised.
+	// 如果内核编译时将其中某些模块配置为 "=y" 而非 "=m"，它们可能是内置的
+	// （不会出现在 /proc/modules 中）。因此把“未在 /proc/modules 中找到”视为
+	// 一个软信号，以实际应用 iptables 规则的结果作为最终裁定；但仍然将其展示
+	// 出来，以免用户感到意外。
 	return CheckResult{
 		Name: fmt.Sprintf("kernel module %s loaded", name), Severity: sev, Passed: false,
 		Detail:  fmt.Sprintf("%s not found in /proc/modules (may be built-in, or may need modprobe)", name),
@@ -151,19 +143,18 @@ func checkKernelModule(name string, fatal bool) CheckResult {
 	}
 }
 
-// checkIptablesLegacyAvailable verifies the iptables-legacy binary exists.
+// checkIptablesLegacyAvailable 确认 iptables-legacy 可执行文件存在。
 //
-// Why this matters: our sandbox testing found that nftables' native
-// "type route hook output" + ct-mark rewriting has an unresolved kernel/
-// nftables-version interaction bug that silently breaks TPROXY interception
-// itself. The classic iptables-legacy TPROXY + CONNMARK save/restore pattern
-// does not have this problem and is what OpenNoFrp's tproxy helper uses.
-// See docs/01-architecture.md section 6.1.
+// 为什么这很重要：我们的沙箱测试发现，nftables 原生的
+// "type route hook output" + ct-mark 重写存在一个尚未解决的内核/nftables 版本
+// 交互 bug，会悄无声息地破坏 TPROXY 拦截本身。经典的 iptables-legacy TPROXY +
+// CONNMARK save/restore 模式没有这个问题，这也是 OpenNoFrp 的 tproxy helper
+// 所采用的方式。参见 docs/01-architecture.md 第 6.1 节。
 func checkIptablesLegacyAvailable() CheckResult {
 	path, err := exec.LookPath("iptables-legacy")
 	if err != nil {
-		// Fall back: on some distros "iptables" itself IS the legacy
-		// binary (no nft wrapper installed at all), which is also fine.
+		// 回退：在某些发行版上，"iptables" 本身就是 legacy 可执行文件
+		// （根本没有安装 nft 包装器），这种情况同样可行。
 		if plainPath, err2 := exec.LookPath("iptables"); err2 == nil {
 			if !isNftWrapper(plainPath) {
 				return CheckResult{
@@ -184,14 +175,12 @@ func checkIptablesLegacyAvailable() CheckResult {
 	}
 }
 
-// checkIptablesLegacyActive checks whether the "iptables" alternative
-// currently points at the legacy backend or the nft backend. This is
-// informational -- opennofrp's tproxy helper always invokes
-// "iptables-legacy" explicitly regardless of the system-wide alternative, so
-// a mismatch here is not fatal, but it IS worth warning about because mixing
-// iptables-nft (used by e.g. Docker) and iptables-legacy (used by us) rules
-// on the same machine means "iptables -L" won't show our rules and vice
-// versa, which is a common source of confusion during troubleshooting.
+// checkIptablesLegacyActive 检查 "iptables" alternative 当前指向 legacy 后端
+// 还是 nft 后端。此项仅供参考——无论系统级 alternative 如何设置，opennofrp 的
+// tproxy helper 总是显式调用 "iptables-legacy"，因此这里不一致并不致命；但确实
+// 值得提醒，因为在同一台机器上混用 iptables-nft（例如 Docker 使用）和
+// iptables-legacy（我们使用）的规则，意味着 "iptables -L" 不会显示我们的规则，
+// 反之亦然，这是排查问题时常见的困惑来源。
 func checkIptablesLegacyActive() CheckResult {
 	out, err := exec.Command("update-alternatives", "--display", "iptables").CombinedOutput()
 	if err != nil {
@@ -238,8 +227,8 @@ func isNftWrapper(path string) bool {
 	return strings.Contains(string(out), "nf_tables")
 }
 
-// Print writes a human-readable report to stdout/stderr, suitable for the
-// "opennofrp-client envcheck" CLI subcommand.
+// Print 将人类可读的报告写到 stdout/stderr，适用于
+// "opennofrp-client envcheck" CLI 子命令。
 func (r Report) Print() {
 	for _, res := range r.Results {
 		mark := "✓"
@@ -261,7 +250,7 @@ func (r Report) Print() {
 	}
 }
 
-// parseUint16 is a small helper used by other envcheck files.
+// parseUint16 是供 envcheck 其他文件使用的小型辅助函数。
 func parseUint16(s string) (uint16, error) {
 	n, err := strconv.ParseUint(s, 10, 16)
 	if err != nil {

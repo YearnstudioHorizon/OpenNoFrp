@@ -1,20 +1,17 @@
-// Package tproxy implements the local transparent-proxy machinery that lets
-// OpenNoFrp Client deliver connections to a completely unmodified local
-// service while making that service see the real, original client IP via a
-// normal accept()/recvfrom() call.
+// Package tproxy 实现本地透明代理机制，使 OpenNoFrp Client 能够把连接交付给
+// 完全未经修改的本地服务，同时让该服务通过普通的 accept()/recvfrom() 调用
+// 看到真实的原始客户端 IP。
 //
-// This package is the direct codification of the sandbox-validated design
-// in docs/01-architecture.md section 6. Every rule and sysctl here exists
-// because a specific alternative was tried and found broken during that
-// validation; see the comments for the "why", not just the "what".
+// 本包是 docs/01-architecture.md 第 6 节中经沙箱验证的设计的直接代码化实现。
+// 这里的每条规则和每个 sysctl 之所以存在，都是因为在那次验证中尝试过某种
+// 替代方案并发现它行不通；请通过注释了解“为什么”，而不仅仅是“是什么”。
 //
-// IMPORTANT: all mutating functions in this package use `iptables-legacy`
-// explicitly, never the bare `iptables` command and never `nft`. This is
-// deliberate: nftables' native TPROXY+route-hook approach has an unresolved
-// kernel/nftables-version bug (observed on Debian 12 / kernel 6.1.0) where
-// marking SYN-ACK reply packets via a "type route hook output" chain
-// silently breaks the original inbound TPROXY interception. iptables-legacy's
-// classic CONNMARK save/restore pattern does not have this problem.
+// IMPORTANT: 本包中所有会修改系统状态的函数都显式使用 `iptables-legacy`，
+// 从不使用裸 `iptables` 命令，也从不使用 `nft`。这是有意为之：nftables 原生的
+// TPROXY+route-hook 方案存在一个尚未解决的内核/nftables 版本 bug（在
+// Debian 12 / kernel 6.1.0 上观察到）：通过 "type route hook output" 链给
+// SYN-ACK 回复包打标记，会悄无声息地破坏原有的入站 TPROXY 拦截。
+// iptables-legacy 经典的 CONNMARK save/restore 模式不存在这个问题。
 package tproxy
 
 import (
@@ -26,26 +23,22 @@ import (
 
 const iptablesBin = "iptables-legacy"
 
-// RuleSpec describes one TPROXY deployment for a single local service port.
+// RuleSpec 描述针对单个本地服务端口的一次 TPROXY 部署。
 type RuleSpec struct {
-	// PublicPort is the port the Client should intercept inbound traffic on
-	// (this corresponds to the metadata's TargetPort -- i.e. the port the
-	// *local service* actually listens on, since TPROXY operates entirely
-	// within this one machine; the Server-side public port is irrelevant
-	// here).
+	// PublicPort 是 Client 拦截入站流量的端口
+	// （对应元数据中的 TargetPort——即*本地服务*实际监听的端口，因为 TPROXY
+	// 完全在本机内部运作；Server 端的公网端口在这里无关紧要）。
 	PublicPort uint16
-	// IngressIface is the network interface inbound traffic arrives on
-	// (e.g. "eth0"). TPROXY only intercepts traffic on this interface, so
-	// that locally-originated traffic (e.g. the proxy's own outbound
-	// connections) is never accidentally re-intercepted.
+	// IngressIface 是入站流量到达的网络接口（例如 "eth0"）。TPROXY 只拦截
+	// 该接口上的流量，从而确保本机发起的流量（例如代理自身的出站连接）
+	// 永远不会被意外地再次拦截。
 	IngressIface string
-	// ListenPort is the port our own proxy process listens on to receive
-	// TPROXY-redirected connections. Must be unique per RuleSpec and must
-	// not collide with any real service.
+	// ListenPort 是我们自己的代理进程用来接收经 TPROXY 重定向的连接的监听端口。
+	// 每个 RuleSpec 必须唯一，且不得与任何真实服务冲突。
 	ListenPort uint16
-	// FWMark is the firewall mark used to tag TPROXY'd packets for policy
-	// routing. Must be unique per RuleSpec (or can be shared if using a
-	// single shared policy-routing table for all rules -- see Manager).
+	// FWMark 是用于给经 TPROXY 处理的数据包打标记、以便进行策略路由的防火墙
+	// 标记。每个 RuleSpec 必须唯一（若所有规则共用同一张策略路由表，也可以
+	// 共享——参见 Manager）。
 	FWMark uint32
 }
 
@@ -53,8 +46,8 @@ func (r RuleSpec) comment() string {
 	return fmt.Sprintf("opennofrp-port-%d", r.PublicPort)
 }
 
-// runIptables runs iptables-legacy with the given arguments and returns a
-// descriptive error on failure, including stderr output.
+// runIptables 使用给定参数运行 iptables-legacy，失败时返回包含 stderr
+// 输出的描述性错误。
 func runIptables(args ...string) error {
 	cmd := exec.Command(iptablesBin, args...)
 	out, err := cmd.CombinedOutput()
@@ -64,11 +57,10 @@ func runIptables(args ...string) error {
 	return nil
 }
 
-// ruleExists checks whether a rule matching the given arguments (minus the
-// leading "-t <table> -A/-D <chain>") already exists, using iptables'
-// built-in -C (check) action. This is what makes all Add* functions in this
-// file idempotent: safe to call on every Client startup without
-// accumulating duplicate rules across restarts.
+// ruleExists 使用 iptables 内置的 -C（检查）操作，判断与给定参数（不含开头的
+// "-t <table> -A/-D <chain>"）匹配的规则是否已存在。正是这一点使本文件中
+// 所有 Add* 函数具备幂等性：每次 Client 启动时调用都是安全的，不会在多次
+// 重启之间累积重复规则。
 func ruleExists(table, chain string, ruleArgs ...string) bool {
 	args := append([]string{"-t", table, "-C", chain}, ruleArgs...)
 	cmd := exec.Command(iptablesBin, args...)
@@ -79,25 +71,22 @@ func fwmarkSpec(mark uint32) string {
 	return fmt.Sprintf("0x%x/0x%x", mark, mark)
 }
 
-// AddTproxyRule installs the mangle-table rules for one local service port:
+// AddTproxyRule 为一个本地服务端口安装 mangle 表规则：
 //
-//  1. PREROUTING: TPROXY redirect matching inbound traffic on the ingress
-//     interface destined for PublicPort, to our ListenPort on 127.0.0.1,
-//     tagging the packet with FWMark.
-//  2. PREROUTING: CONNMARK --save-mark for the same match, so the mark
-//     survives into conntrack and can be restored on the reply path.
-//  3. OUTPUT: CONNMARK --restore-mark for packets with source port
-//     PublicPort (i.e. the reply direction from the local service back to
-//     our proxy), so the reply's policy routing decision also uses FWMark
-//     and gets delivered back to our proxy via the local routing table
-//     rather than leaking out a physical/bridge interface.
+//  1. PREROUTING：匹配入站接口上目标为 PublicPort 的入站流量，执行 TPROXY
+//     重定向到 127.0.0.1 上我们的 ListenPort，并给数据包打上 FWMark。
+//  2. PREROUTING：对相同的匹配条件执行 CONNMARK --save-mark，使标记保存到
+//     conntrack 中，以便在回复路径上恢复。
+//  3. OUTPUT：对源端口为 PublicPort 的数据包（即从本地服务返回我们代理的
+//     回复方向）执行 CONNMARK --restore-mark，使回复的策略路由决策同样使用
+//     FWMark，并经由本地路由表交付回我们的代理，而不是从物理/网桥接口
+//     泄漏出去。
 //
-// This exact three-rule pattern (TPROXY + save in PREROUTING, restore in
-// OUTPUT, matched by sport/dport respectively) is the one sequence that was
-// validated end-to-end against a real unmodified TCP service in the sandbox.
-// Do not "simplify" it by dropping the CONNMARK pair -- without it the
-// handshake's reply packet has no mark, falls through to the main routing
-// table, and the proxy's connect() call hangs until timeout.
+// 这一确切的三规则模式（PREROUTING 中 TPROXY + save，OUTPUT 中 restore，
+// 分别按 sport/dport 匹配）是在沙箱中针对真实的未修改 TCP 服务端到端验证
+// 通过的唯一序列。不要通过去掉 CONNMARK 这对规则来“简化”它——没有它们，
+// 握手的回复包就没有标记，会落入主路由表，导致代理的 connect() 调用一直
+// 挂起直到超时。
 func AddTproxyRule(spec RuleSpec) error {
 	port := strconv.Itoa(int(spec.PublicPort))
 	listenPort := strconv.Itoa(int(spec.ListenPort))
@@ -147,11 +136,10 @@ func AddTproxyRule(spec RuleSpec) error {
 	return nil
 }
 
-// RemoveTproxyRule deletes every rule AddTproxyRule might have created for
-// this spec. Deletion is also idempotent (safe to call even if some or all
-// rules are already gone) and uses -D with the exact same argument lists
-// used for -C/-A, so it only ever removes rules this package itself added
-// (never a blanket flush of the mangle table).
+// RemoveTproxyRule 删除 AddTproxyRule 可能为该 spec 创建的所有规则。删除操作
+// 同样是幂等的（即使部分或全部规则已不存在，调用也是安全的），并使用与
+// -C/-A 完全相同的参数列表执行 -D，因此只会删除本包自己添加的规则
+// （绝不会整体清空 mangle 表）。
 func RemoveTproxyRule(spec RuleSpec) error {
 	port := strconv.Itoa(int(spec.PublicPort))
 	listenPort := strconv.Itoa(int(spec.ListenPort))
@@ -161,7 +149,7 @@ func RemoveTproxyRule(spec RuleSpec) error {
 	var firstErr error
 	tryDelete := func(table, chain string, args ...string) {
 		if !ruleExists(table, chain, args...) {
-			return // already gone
+			return // 已不存在
 		}
 		full := append([]string{"-t", table, "-D", chain}, args...)
 		if err := runIptables(full...); err != nil && firstErr == nil {
@@ -187,34 +175,30 @@ func RemoveTproxyRule(spec RuleSpec) error {
 	return firstErr
 }
 
-// connmarkComment tags the direct-dial CONNMARK rules this package adds for
-// the reply path (see EnsureConnmarkReplyRules). Distinct from the
-// "opennofrp-port-" tag used by AddTproxyRule so ListOpenNoFrpRules and the
-// uninstaller can distinguish the two rule families.
+// connmarkComment 用于标记本包为回复路径添加的直连拨号 CONNMARK 规则
+// （参见 EnsureConnmarkReplyRules）。它与 AddTproxyRule 使用的
+// "opennofrp-port-" 标签不同，以便 ListOpenNoFrpRules 和卸载程序能够区分
+// 这两类规则。
 const connmarkComment = "opennofrp-connmark"
 
-// EnsureConnmarkReplyRules installs the mangle OUTPUT pair required by the
-// direct spoofed-dial path (the Client receives the original client address
-// in the yamux stream metadata and dials the local service itself with
-// IP_TRANSPARENT + SO_MARK, so there is no inbound TPROXY interception to
-// hang the PREROUTING half of AddTproxyRule off):
+// EnsureConnmarkReplyRules 安装直连伪造源地址拨号路径所需的 mangle OUTPUT
+// 规则对（Client 从 yamux 流元数据中获取原始客户端地址，并自行使用
+// IP_TRANSPARENT + SO_MARK 拨号连接本地服务，因此不存在可以挂接
+// AddTproxyRule 中 PREROUTING 那一半规则的入站 TPROXY 拦截）：
 //
-//  1. OUTPUT: CONNMARK --save-mark for our outbound packets (they carry
-//     fwmark via SO_MARK), so the connection's mark lands in conntrack.
-//  2. OUTPUT: CONNMARK --restore-mark for the reply direction (the local
-//     service's SYN-ACK/ACK/data packets carry no mark of their own), so
-//     the fwmark policy rule (table 100, "local default dev lo") delivers
-//     them back to the spoofed socket instead of routing them out the
-//     default gateway -- without this the handshake's reply packet leaks
-//     out a physical interface and connect() hangs until timeout.
+//  1. OUTPUT：对我们的出站数据包（它们通过 SO_MARK 携带 fwmark）执行
+//     CONNMARK --save-mark，使连接的标记写入 conntrack。
+//  2. OUTPUT：对回复方向（本地服务的 SYN-ACK/ACK/数据包本身不带任何标记）
+//     执行 CONNMARK --restore-mark，使 fwmark 策略规则（table 100，
+//     "local default dev lo"）将它们交付回伪造源地址的 socket，而不是经由
+//     默认网关路由出去——没有这一步，握手的回复包会从物理接口泄漏出去，
+//     connect() 会一直挂起直到超时。
 //
-// Masks are limited to the fwmark's own bits so this never clobbers
-// unrelated marks on other locally-generated connections. This exact pair
-// (plus the policy route and sysctls) was validated end-to-end on the
-// target production client host: a spoofed connect() to a local HTTP
-// service completed and the service accepted with the spoofed source IP.
-// Idempotent: safe to call on every setup path without accumulating
-// duplicate rules.
+// 掩码仅限于 fwmark 自身的位，因此绝不会覆盖其他本机发起的连接上的无关
+// 标记。这一确切的规则对（加上策略路由和 sysctl）已在目标生产客户端主机上
+// 端到端验证通过：对本地 HTTP 服务的伪造源地址 connect() 成功完成，且该服务
+// 以伪造的源 IP 接受了连接。
+// 幂等：在每条设置路径上调用都是安全的，不会累积重复规则。
 func EnsureConnmarkReplyRules(fwmark uint32) error {
 	mask := fmt.Sprintf("0x%x", fwmark)
 	markSpec := fwmarkSpec(fwmark)
@@ -249,10 +233,10 @@ func EnsureConnmarkReplyRules(fwmark uint32) error {
 	return nil
 }
 
-// RemoveConnmarkReplyRules deletes exactly what EnsureConnmarkReplyRules
-// added for this fwmark. Idempotent and safe when iptables-legacy or the
-// rules are absent (used by the uninstaller path, which must not fail just
-// because the Client never got far enough to install them).
+// RemoveConnmarkReplyRules 精确删除 EnsureConnmarkReplyRules 为该 fwmark
+// 添加的规则。它是幂等的，在 iptables-legacy 或这些规则不存在时也是安全的
+// （供卸载程序路径使用，该路径不能仅仅因为 Client 从未运行到安装这些规则的
+// 阶段就失败）。
 func RemoveConnmarkReplyRules(fwmark uint32) error {
 	mask := fmt.Sprintf("0x%x", fwmark)
 	markSpec := fwmarkSpec(fwmark)
@@ -284,9 +268,9 @@ func RemoveConnmarkReplyRules(fwmark uint32) error {
 	return firstErr
 }
 
-// ListOpenNoFrpRules returns the raw iptables-legacy mangle table listing,
-// filtered to only lines containing our comment tag prefix. Used by the
-// uninstaller to verify a clean removal, and by diagnostics tooling.
+// ListOpenNoFrpRules 返回 iptables-legacy mangle 表的原始列表输出，并过滤为
+// 仅包含我们注释标签前缀的行。供卸载程序验证是否已干净移除，也供诊断工具
+// 使用。
 func ListOpenNoFrpRules() (string, error) {
 	out, err := exec.Command(iptablesBin, "-t", "mangle", "-L", "-n", "-v").CombinedOutput()
 	if err != nil {

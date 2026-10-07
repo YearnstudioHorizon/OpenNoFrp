@@ -1,9 +1,8 @@
-// Package listener manages the public-facing TCP/UDP listeners that forward
-// traffic into Client sessions. The set of open ports is driven entirely by
-// the rules table: enabling a rule opens its public port, disabling closes
-// it. Crucially: no raw sockets, no iptables/nftables/routing -- this
-// package is the embodiment of the "cloud server stays pure userspace" rule
-// from docs/01-architecture.md.
+// Package listener 管理面向公网的 TCP/UDP 监听器，这些监听器将流量转发到
+// Client 会话中。打开的端口集合完全由 rules 表驱动：启用一条规则即打开其
+// 公网端口，禁用则关闭它。关键在于：不使用原始套接字，不使用
+// iptables/nftables/路由——本包正是 docs/01-architecture.md 中“云服务器
+// 保持纯用户态”这一原则的体现。
 package listener
 
 import (
@@ -18,17 +17,16 @@ import (
 	"opennofrp/server/internal/session"
 )
 
-// RuleView carries just the fields a listener needs from a rules-table row.
+// RuleView 仅携带监听器从 rules 表某一行中所需的字段。
 type RuleView struct {
 	ID       uint32
 	ClientID string
-	Protocol string // "tcp", "udp" or "tcp+udp" (dual stack)
+	Protocol string // "tcp"、"udp" 或 "tcp+udp"（双栈）
 	Port     uint16
 }
 
-// expandRule splits a dual-stack ("tcp+udp") rule into one TCP and one UDP
-// view sharing the same rule ID and port. Single-protocol rules are
-// returned unchanged.
+// expandRule 将一条双栈（"tcp+udp"）规则拆分为一个 TCP 视图和一个 UDP
+// 视图，二者共享相同的规则 ID 和端口。单协议规则原样返回。
 func expandRule(r RuleView) []RuleView {
 	if r.Protocol == "tcp+udp" {
 		t, u := r, r
@@ -39,11 +37,11 @@ func expandRule(r RuleView) []RuleView {
 	return []RuleView{r}
 }
 
-// ruleView keeps the old unexported alias shape; use RuleView in new code.
+// ruleView 保留旧的未导出别名形式；新代码请使用 RuleView。
 type ruleView = RuleView
 
-// SessionLookup returns the live session for a client ID, or nil when that
-// Client is not currently connected. Implemented by the server struct.
+// SessionLookup 返回某个 client ID 对应的在线会话；若该 Client 当前未连接，
+// 则返回 nil。由 server 结构体实现。
 type SessionLookup func(clientID string) *session.Session
 
 type Manager struct {
@@ -74,7 +72,7 @@ type udpListener struct {
 type udpFlow struct {
 	remote *net.UDPAddr
 	stream net.Conn
-	act    chan struct{} // receives client datagrams from the demux loop
+	act    chan struct{} // 接收来自解复用循环的客户端数据报
 }
 
 func NewManager(bindAddr string, logger *slog.Logger, lookup SessionLookup) *Manager {
@@ -87,10 +85,9 @@ func NewManager(bindAddr string, logger *slog.Logger, lookup SessionLookup) *Man
 	}
 }
 
-// OpenRule starts listening for the given rule's protocol+port. Idempotent
-// per (protocol, port): calling again with the same identity is a no-op,
-// calling with a different ruleID for an already-open port returns an error
-// (first-come-first-served).
+// OpenRule 开始监听给定规则的协议+端口。对每个 (protocol, port) 是幂等的：
+// 以相同标识再次调用不做任何事；对已打开的端口以不同的 ruleID 调用则返回
+// 错误（先到先得）。
 func (m *Manager) OpenRule(r ruleView) error {
 	switch r.Protocol {
 	case "tcp":
@@ -214,8 +211,8 @@ func (m *Manager) udpLoop(ul *udpListener) {
 			m.mu.Lock()
 			ul.flows[key] = flow
 			m.mu.Unlock()
-			go m.udpFlowTX(ul, flow) // UDP socket -> stream
-			go m.udpFlowRX(ul, flow) // stream -> UDP socket
+			go m.udpFlowTX(ul, flow) // UDP 套接字 -> stream
+			go m.udpFlowRX(ul, flow) // stream -> UDP 套接字
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
@@ -223,7 +220,7 @@ func (m *Manager) udpLoop(ul *udpListener) {
 			m.reapFlow(ul, key)
 			continue
 		}
-		// kick the flow's own watchdog so idle flows eventually close
+		// 触发该流自身的看门狗，使空闲流最终能够关闭
 		select {
 		case flow.act <- struct{}{}:
 		default:
@@ -231,12 +228,12 @@ func (m *Manager) udpLoop(ul *udpListener) {
 	}
 }
 
-// udpFlowTX: remote client datagrams were already framed into the stream by
-// udpLoop; this is stream<-socket direction... actually split cleanly:
+// udpFlowTX：远端客户端的数据报已由 udpLoop 封帧写入 stream；这是
+// stream<-socket 方向……实际上职责划分如下：
 //
-//	udpLoop reads socket, frames to stream (TX towards client)
-//	udpFlowRX reads frames from stream, writes them to the UDP socket
-//	udpFlowTX currently: watchdog for idle flow + cleanup on done
+//	udpLoop 读取套接字，封帧写入 stream（朝向 client 的 TX）
+//	udpFlowRX 从 stream 读取帧，将其写入 UDP 套接字
+//	udpFlowTX 目前：空闲流的看门狗 + done 时的清理
 func (m *Manager) udpFlowTX(ul *udpListener, flow *udpFlow) {
 	t := time.NewTimer(120 * time.Second)
 	defer t.Stop()
@@ -283,8 +280,8 @@ func (m *Manager) reapFlow(ul *udpListener, key string) {
 	}
 }
 
-// ClosePort closes the TCP and/or UDP listener on a port. Called when the
-// rule driving it is disabled or deleted.
+// ClosePort 关闭某个端口上的 TCP 和/或 UDP 监听器。在驱动它的规则被禁用或
+// 删除时调用。
 func (m *Manager) ClosePort(protocol string, port uint16) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -317,8 +314,8 @@ func (m *Manager) reapFlowLocked(ul *udpListener, key string) {
 	}
 }
 
-// OpenPorts returns a snapshot of currently open (protocol, port) -> ruleID
-// pairs, used by Reconcile to compute the diff.
+// OpenPorts 返回当前已打开的 (protocol, port) -> ruleID 映射的快照，供
+// Reconcile 计算差异使用。
 func (m *Manager) OpenPorts() map[string]uint32 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -332,14 +329,13 @@ func (m *Manager) OpenPorts() map[string]uint32 {
 	return out
 }
 
-// Reconcile makes the set of open listeners exactly match the desired set:
-// opens new/missing ports, closes ports no longer desired, and restarts a
-// port whose owning rule ID changed (rule deleted and recreated with the
-// same port).
+// Reconcile 使已打开的监听器集合与期望集合完全一致：打开新增/缺失的端口，
+// 关闭不再需要的端口，并重启所属规则 ID 已变化的端口（规则被删除后以相同
+// 端口重新创建）。
 func (m *Manager) Reconcile(desired []RuleView) {
 	want := make(map[string]RuleView)
 	for _, r := range desired {
-		// dual-stack rules become two entries: tcp:port and udp:port
+		// 双栈规则会变成两个条目：tcp:port 和 udp:port
 		for _, v := range expandRule(r) {
 			want[fmt.Sprintf("%s:%d", v.Protocol, v.Port)] = v
 		}
@@ -363,9 +359,8 @@ func (m *Manager) Reconcile(desired []RuleView) {
 	}
 }
 
-// CloseRule closes any listener driven by the given rule ID (port+protocol
-// not required from the caller because rule IDs map 1:1 at a moment in
-// time to one port+protocol row).
+// CloseRule 关闭由给定规则 ID 驱动的所有监听器（之所以不需要调用方提供
+// port+protocol，是因为在任一时刻规则 ID 都与一行 port+protocol 一一对应）。
 func (m *Manager) CloseRule(ruleID uint32, protocol string, port uint16) {
 	for _, v := range expandRule(RuleView{ID: ruleID, Protocol: protocol, Port: port}) {
 		m.ClosePort(v.Protocol, v.Port)

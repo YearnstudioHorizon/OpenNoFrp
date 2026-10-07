@@ -1,11 +1,9 @@
-// Package forwarder implements the data-plane logic that runs on the Client:
-// for each proxy rule with preserve_source_ip enabled, it listens for
-// TPROXY-redirected connections, and for each one dials the real local
-// service with a spoofed source IP matching the original remote client.
+// Package forwarder 实现运行在 Client 上的数据面逻辑：对每条启用了
+// preserve_source_ip 的代理规则，它监听经 TPROXY 重定向而来的连接，并为每个
+// 连接以伪造的源 IP（与原始远端客户端一致）拨号到真实的本地服务。
 //
-// For rules without preserve_source_ip, it falls back to a plain reverse
-// proxy (dial the local service normally; the local service will see the
-// Client's own loopback/local address as the source, same as vanilla frp).
+// 对于未启用 preserve_source_ip 的规则，则回退为普通反向代理（正常拨号到本地
+// 服务；本地服务看到的源地址将是 Client 自身的回环/本地地址，与原版 frp 相同）。
 package forwarder
 
 import (
@@ -18,22 +16,21 @@ import (
 	"opennofrp/client/internal/tproxy"
 )
 
-// TCPRule is the runtime configuration for one TCP proxy rule.
+// TCPRule 是一条 TCP 代理规则的运行时配置。
 type TCPRule struct {
 	Name             string
 	LocalIP          net.IP
 	LocalPort        uint16
 	PreserveSourceIP bool
 
-	// Only used when PreserveSourceIP is true:
+	// 仅在 PreserveSourceIP 为 true 时使用：
 	IngressIface string
-	ListenPort   uint16 // the port our TPROXY listener binds to
+	ListenPort   uint16 // 我们的 TPROXY 监听器绑定的端口
 }
 
-// TCPForwarder owns the listener for one TCPRule with PreserveSourceIP=true.
-// It must be started after the corresponding tproxy.RuleSpec has been
-// applied via tproxy.Manager.Setup, otherwise inbound connections will never
-// reach ListenPort in the first place.
+// TCPForwarder 持有一条 PreserveSourceIP=true 的 TCPRule 的监听器。
+// 它必须在对应的 tproxy.RuleSpec 已通过 tproxy.Manager.Setup 应用之后再启动，
+// 否则入站连接根本不会到达 ListenPort。
 type TCPForwarder struct {
 	Rule   TCPRule
 	Logger *slog.Logger
@@ -42,12 +39,10 @@ type TCPForwarder struct {
 	listener net.Listener
 }
 
-// Start begins listening on 127.0.0.1:ListenPort for TPROXY-redirected
-// connections. The listening socket itself needs IP_TRANSPARENT set (via
-// SO_IP_TRANSPARENT on the listening socket) so that accept() can hand back
-// connections whose local address is the *original* destination address
-// (the TPROXY semantics relied upon throughout this design -- see
-// docs/01-architecture.md).
+// Start 开始在 127.0.0.1:ListenPort 上监听经 TPROXY 重定向的连接。监听 socket
+// 本身需要设置 IP_TRANSPARENT（通过在监听 socket 上设置 SO_IP_TRANSPARENT），
+// 这样 accept() 才能返回本地地址为*原始*目的地址的连接（这是整个设计所依赖的
+// TPROXY 语义 —— 参见 docs/01-architecture.md）。
 func (f *TCPForwarder) Start(ctx context.Context) error {
 	lc := net.ListenConfig{
 		Control: controlSetTransparent,
@@ -85,14 +80,12 @@ func (f *TCPForwarder) acceptLoop(ctx context.Context) {
 	}
 }
 
-// handleConn is called for every TPROXY-redirected inbound connection. Per
-// TPROXY semantics: conn.RemoteAddr() is the ORIGINAL remote client's real
-// address (this is the whole point of TPROXY vs. a plain REDIRECT/DNAT), and
-// conn.LocalAddr() -- via getsockname() -- is the connection's ORIGINAL
-// destination address (i.e. the public-facing address the client thought it
-// was connecting to). We don't actually need LocalAddr here since we already
-// know the target local service's address from the rule config, but logging
-// it is useful for diagnostics.
+// handleConn 会针对每个经 TPROXY 重定向的入站连接被调用。按照 TPROXY 语义：
+// conn.RemoteAddr() 是原始远端客户端的真实地址（这正是 TPROXY 相对于普通
+// REDIRECT/DNAT 的意义所在），而 conn.LocalAddr() —— 通过 getsockname() ——
+// 是该连接的原始目的地址（即客户端以为自己所连接的对外公开地址）。这里其实
+// 并不需要 LocalAddr，因为我们已经从规则配置中得知目标本地服务的地址，但把它
+// 记录到日志中有助于诊断。
 func (f *TCPForwarder) handleConn(ctx context.Context, clientConn net.Conn) {
 	defer clientConn.Close()
 
@@ -122,8 +115,7 @@ func (f *TCPForwarder) handleConn(ctx context.Context, clientConn net.Conn) {
 	relay(clientConn, upstream)
 }
 
-// relay pipes bytes bidirectionally between two connections until either
-// side closes or errors.
+// relay 在两个连接之间双向传输字节，直到任一端关闭或出错。
 func relay(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
@@ -137,12 +129,10 @@ func relay(a, b net.Conn) {
 	<-done
 }
 
-// DialPlain connects to the local service without any source-IP spoofing.
-// Used for rules with PreserveSourceIP=false, or as the behavior OpenNoFrp
-// falls back to for Docker bridge-network targets where TPROXY cannot work
-// (see docs/01-architecture.md section 6.2) -- the local service will see
-// the Client process's own address as the connection source, matching
-// vanilla frp's behavior.
+// DialPlain 在不做任何源 IP 伪造的情况下连接本地服务。用于 PreserveSourceIP=false
+// 的规则，或作为 OpenNoFrp 在 TPROXY 无法生效的 Docker bridge 网络目标上的回退
+// 行为（参见 docs/01-architecture.md 第 6.2 节）—— 本地服务看到的连接源地址将是
+// Client 进程自身的地址，与原版 frp 的行为一致。
 func DialPlain(ctx context.Context, localIP net.IP, localPort uint16) (net.Conn, error) {
 	var d net.Dialer
 	return d.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", localIP, localPort))

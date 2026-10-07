@@ -1,21 +1,20 @@
 #!/bin/bash
-# OpenNoFrp Client uninstaller (Linux).
+# OpenNoFrp 客户端卸载脚本 (Linux)。
 #
-# Whitelist-only removal, per docs/02-risk-assessment.md section 5:
-#   - stops + disables the opennofrp-client systemd unit (which itself runs
-#     "opennofrp-client tproxy-teardown" via ExecStopPost, removing every
-#     TPROXY iptables rule / ip rule / ip route / sysctl change this Client
-#     instance ever made -- based on its own persisted state file, not
-#     guesswork)
-#   - as a defense-in-depth belt-and-suspenders step, explicitly runs
-#     tproxy-teardown again directly in case the service was already dead
-#     and ExecStopPost never fired
-#   - removes exactly: /etc/systemd/system/opennofrp-client.service,
-#     /opt/opennofrp/, /var/lib/opennofrp/
-#   - does NOT remove /etc/opennofrp/client.toml by default (your config,
-#     and any secrets in it, are left alone unless you pass --purge-config)
-#   - never runs a blanket "iptables -F" / "nft flush ruleset" / "ip route
-#     flush" -- only ever the exact rules opennofrp itself tracks
+# 仅按白名单删除，依据 docs/02-risk-assessment.md 第 5 节：
+#   - 停止并禁用 opennofrp-client systemd 单元（该单元自身会通过 ExecStopPost
+#     运行 "opennofrp-client tproxy-teardown"，移除此 Client 实例曾创建的
+#     每一条 TPROXY iptables 规则 / ip rule / ip route / sysctl 修改 -- 依据
+#     其自身持久化的状态文件，而非猜测）
+#   - 作为纵深防御的双保险措施，再次直接显式运行
+#     tproxy-teardown，以防服务早已停止、
+#     ExecStopPost 从未触发
+#   - 仅删除以下内容：/etc/systemd/system/opennofrp-client.service、
+#     /opt/opennofrp/、/var/lib/opennofrp/
+#   - 默认不删除 /etc/opennofrp/client.toml（你的配置及其中的任何密钥
+#     都会保留，除非传入 --purge-config）
+#   - 绝不运行笼统的 "iptables -F" / "nft flush ruleset" / "ip route
+#     flush" -- 只处理 opennofrp 自身所跟踪的那些规则
 
 set -euo pipefail
 

@@ -1,7 +1,6 @@
-// Package config loads the OpenNoFrp Server configuration (post-refactor:
-// the Server is rule-authoritative, so its TOML is about process listeners
-// and the SQLite data file, not port-range allowlists -- rule-level access
-// control happens at the panel layer via the reserved-ports guard).
+// Package config 加载 OpenNoFrp Server 的配置（重构后：Server 是规则的权威来源，
+// 因此其 TOML 配置关注的是进程监听地址和 SQLite 数据文件，而不是端口范围白名单——
+// 规则级别的访问控制由面板层通过保留端口守卫来实现）。
 package config
 
 import (
@@ -10,42 +9,39 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Config is the top-level Server configuration.
+// Config 是 Server 的顶层配置。
 type Config struct {
 	Server ServerConfig `toml:"server"`
 	Log    LogConfig    `toml:"log"`
 }
 
-// ServerConfig describes the listeners and the data-directory layout of the
-// Server/panel process.
+// ServerConfig 描述 Server/面板进程的监听地址以及数据目录布局。
 type ServerConfig struct {
-	// BindAddr the control port binds to (Clients connect here).
-	BindAddr string `toml:"bind_addr"` // e.g. "0.0.0.0"
-	// ControlPort is the TCP port Clients use for handshake/heartbeat.
-	ControlPort int `toml:"control_port"` // e.g. 17000
+	// BindAddr 是控制端口绑定的地址（Client 连接到这里）。
+	BindAddr string `toml:"bind_addr"` // 例如 "0.0.0.0"
+	// ControlPort 是 Client 用于握手/心跳的 TCP 端口。
+	ControlPort int `toml:"control_port"` // 例如 17000
 
-	// PanelAddr/PanelPort serve the admin web UI.
-	PanelAddr string `toml:"panel_addr"` // e.g. "0.0.0.0"
-	PanelPort int    `toml:"panel_port"` // e.g. 8080
+	// PanelAddr/PanelPort 用于提供管理后台 Web UI。
+	PanelAddr string `toml:"panel_addr"` // 例如 "0.0.0.0"
+	PanelPort int    `toml:"panel_port"` // 例如 8080
 
-	// HeartbeatTimeoutSeconds: if no heartbeat (or any stream activity) is
-	// seen from a Client within this many seconds, the Server considers it
-	// disconnected. Its public listeners stay open (they're rule-driven,
-	// not session-driven), but forwarded connections are refused until the
-	// Client reconnects.
+	// HeartbeatTimeoutSeconds：如果在这么多秒内没有收到某个 Client 的心跳
+	// （或任何流活动），Server 就认为它已断开连接。其公网监听仍保持开启
+	// （它们由规则驱动，而非由会话驱动），但在 Client 重新连接之前，转发连接
+	// 会被拒绝。
 	HeartbeatTimeoutSeconds int `toml:"heartbeat_timeout_seconds"`
 
-	// DBPath is the SQLite file holding admin account, clients, tokens,
-	// rules, and reserved ports.
-	DBPath string `toml:"db_path"` // e.g. "/var/lib/opennofrp/opennofrp.db"
+	// DBPath 是保存管理员账户、客户端、token、规则和保留端口的 SQLite 文件。
+	DBPath string `toml:"db_path"` // 例如 "/var/lib/opennofrp/opennofrp.db"
 
-	// ClientBinDir holds prebuilt client binaries served by /dl/* so the
-	// one-line install command works without the client machine needing Go.
-	ClientBinDir string `toml:"client_bin_dir"` // e.g. "/opt/opennofrp/client-bins"
+	// ClientBinDir 存放由 /dl/* 提供下载的预编译客户端二进制文件，使一行安装
+	// 命令无需客户端机器安装 Go 即可使用。
+	ClientBinDir string `toml:"client_bin_dir"` // 例如 "/opt/opennofrp/client-bins"
 
-	// PublicBaseURL is the base URL (scheme://host[:port]) external users
-	// use to reach the panel. Used when rendering the one-line install
-	// command. Defaults to http://<panel_addr-or-detected-host>:<panel_port>.
+	// PublicBaseURL 是外部用户访问面板所用的基础 URL（scheme://host[:port]）。
+	// 在渲染一行安装命令时使用。默认为
+	// http://<panel_addr-or-detected-host>:<panel_port>。
 	PublicBaseURL string `toml:"public_base_url"`
 
 	// TLSCertPath / TLSKeyPath 用于控制通道的 TLS 自签名证书与私钥
@@ -113,7 +109,7 @@ func validate(cfg *Config) error {
 	return nil
 }
 
-// ExampleTOML returns a commented example server configuration.
+// ExampleTOML 返回一份带注释的服务端示例配置。
 func ExampleTOML() string {
 	return `# OpenNoFrp Server configuration
 # This process NEVER touches iptables/nftables/routing/sysctls. It is a

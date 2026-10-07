@@ -1,8 +1,7 @@
-// Command opennofrp-client is the entry point for the OpenNoFrp local
-// Client. Its configuration is deliberately minimal after the productization
-// refactor: how to reach the Server, and the one-time token used on first
-// boot. All forwarding rules come from the Server (panel-managed) over the
-// control connection; this process only has to honour them.
+// Command opennofrp-client 是 OpenNoFrp 本地 Client 的入口程序。经过产品化
+// 重构后，其配置被刻意精简为：如何连接 Server，以及首次启动时使用的一次性
+// token。所有转发规则均由 Server（通过面板管理）经控制连接下发；本进程只需
+// 遵照执行即可。
 package main
 
 import (
@@ -78,8 +77,8 @@ func runInitConfig() {
 	fmt.Printf("wrote example config to %s -- set server.addr and server.token, then you're done\n", *path)
 }
 
-// runTproxyTeardown removes every host-level TPROXY rule/route/sysctl
-// change this Client instance has made, based on the persisted state file.
+// runTproxyTeardown 根据持久化的状态文件，移除本 Client 实例所做的全部
+// 主机级 TPROXY 规则/路由/sysctl 变更。
 func runTproxyTeardown() {
 	fs := flag.NewFlagSet("tproxy-teardown", flag.ExitOnError)
 	stateDir := fs.String("state-dir", defaultStateDir, "directory for TPROXY state")
@@ -116,9 +115,9 @@ func runClient() {
 		os.Exit(1)
 	}
 
-	// Controlconn resolves its credentials file next to this config path
-	// unless OPENNOFRP_CREDENTIALS overrides it; publish the path so the
-	// control connection finds the same file without threading args.
+	// 除非被 OPENNOFRP_CREDENTIALS 覆盖，controlconn 会在此配置文件所在目录
+	// 下解析其凭据文件；这里将该路径发布到环境变量中，使控制连接无需层层
+	// 传参即可找到同一个文件。
 	os.Setenv("OPENNOFRP_CLIENT_CONFIG", *configPath)
 
 	rules := rulesync.New(logger, *stateDir)

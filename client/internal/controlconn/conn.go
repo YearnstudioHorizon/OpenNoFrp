@@ -1,8 +1,7 @@
-// Package controlconn manages the Client's connection to the Server: first
-// boot registration (one-time token -> permanent credentials), every-later
-// handshake (client_id/client_secret), periodic heartbeats, automatic
-// reconnection with exponential backoff, rules-snapshot reception, and
-// accepting the yamux streams the Server opens for each forwarded connection.
+// Package controlconn 管理 Client 到 Server 的连接：首次启动注册（一次性
+// token -> 永久凭据）、此后每次连接的握手（client_id/client_secret）、周期性
+// 心跳、带指数退避的自动重连、接收规则快照，以及接受 Server 为每个被转发
+// 连接打开的 yamux 流。
 package controlconn
 
 import (
@@ -24,25 +23,21 @@ import (
 	"opennofrp/pkg/version"
 )
 
-// StreamHandler is called for every new yamux stream the Server opens,
-// after its StreamMetadata header has already been read. The handler is
-// responsible for connecting to the right local service (with or without
-// source-IP spoofing, per the matching rule's settings) and relaying bytes.
+// StreamHandler 会在 Server 打开每个新的 yamux 流、且其 StreamMetadata 头部
+// 已被读取之后被调用。处理函数负责连接到正确的本地服务（根据匹配规则的设置
+// 决定是否伪造源 IP）并中继字节数据。
 type StreamHandler func(ctx context.Context, meta protocol.StreamMetadata, stream net.Conn)
 
-// Client manages one logical connection to one OpenNoFrp Server, including
-// automatic reconnection.
+// Client 管理到一个 OpenNoFrp Server 的一条逻辑连接，包括自动重连。
 type Client struct {
 	Cfg    *config.Config
 	Logger *slog.Logger
-	// OnRules is called every time the Server pushes a fresh rules
-	// snapshot (once right after handshake, then on every panel-side
-	// change). Must be safe to call again after any disconnect -- each
-	// reconnect yields exactly one fresh snapshot.
+	// OnRules 在 Server 每次推送新的规则快照时被调用（握手后立即调用一次，
+	// 之后面板侧每次变更时调用）。必须保证在任意断线后可安全地再次调用 ——
+	// 每次重连都会恰好产生一份新的快照。
 	OnRules func(rules []protocol.Rule)
-	// OnCredentials is called once when this machine completes its
-	// one-time registration and receives permanent credentials; the
-	// caller should persist them (see config.SaveCredentials).
+	// OnCredentials 在本机完成一次性注册并获得永久凭据时被调用一次；
+	// 调用方应将其持久化（参见 config.SaveCredentials）。
 	OnCredentials func(c config.Credentials)
 	Handler       StreamHandler
 
@@ -50,9 +45,8 @@ type Client struct {
 	lastObservedFingerprint string
 }
 
-// Run connects to the Server and services the connection until ctx is
-// cancelled, automatically reconnecting with exponential backoff on
-// failure. This function only returns when ctx is cancelled.
+// Run 连接到 Server 并持续服务该连接直到 ctx 被取消，失败时以指数退避
+// 自动重连。本函数仅在 ctx 被取消时返回。
 func (c *Client) Run(ctx context.Context) {
 	backoff := time.Duration(c.Cfg.Server.ReconnectMinSeconds) * time.Second
 	maxBackoff := time.Duration(c.Cfg.Server.ReconnectMaxSeconds) * time.Second
@@ -132,10 +126,9 @@ func (c *Client) runOnce(ctx context.Context) error {
 	}
 	defer session.Close()
 
-	// One shared, full-duplex control stream carries heartbeats
-	// (client->server) and rules snapshots (server->client) in opposite
-	// directions. The two directions are independent byte streams over the
-	// same underlying yamux stream, so there is no interleaving hazard.
+	// 一条共享的全双工控制流以相反方向承载心跳（client->server）和规则
+	// 快照（server->client）。两个方向是同一底层 yamux 流上相互独立的
+	// 字节流，因此不存在交错写入的风险。
 	ctrlStream, err := session.Open()
 	if err != nil {
 		return fmt.Errorf("controlconn: open control stream: %w", err)
@@ -156,11 +149,10 @@ func (c *Client) runOnce(ctx context.Context) error {
 	}
 }
 
-// handshakeOrRegister speaks the control-plane prelude on the fresh TCP
-// conn before yamux starts. If this machine has no persisted credentials
-// yet, it performs the one-time registration exchange (register token ->
-// permanent client_id/client_secret), persists them via OnCredentials, and
-// retries the handshake with them immediately.
+// handshakeOrRegister 在 yamux 启动之前，于新建的 TCP 连接上完成控制面的
+// 前导交互。如果本机尚无持久化的凭据，它会执行一次性注册交换（注册 token ->
+// 永久 client_id/client_secret），通过 OnCredentials 将其持久化，并立即使用
+// 这些凭据重新进行握手。
 func (c *Client) handshakeOrRegister(conn net.Conn) error {
 	configPath := os.Getenv("OPENNOFRP_CLIENT_CONFIG")
 	if configPath == "" {
@@ -237,13 +229,12 @@ func (c *Client) handshakeOrRegister(conn net.Conn) error {
 	return nil
 }
 
-// rulesLoop reads server->client RulesSnapshot messages arriving on the
-// shared control stream (opposite direction from our heartbeat writes).
+// rulesLoop 读取到达共享控制流上的 server->client RulesSnapshot 消息
+// （与我们写心跳的方向相反）。
 func (c *Client) rulesLoop(ctx context.Context, ctrlStream net.Conn) {
 	for {
-		// RulesSnapshot and HeartbeatAck share the control stream with
-		// our heartbeat writes, but in the opposite direction. Each
-		// length-prefixed frame decodes into this envelope.
+		// RulesSnapshot 和 HeartbeatAck 与我们的心跳写入共享控制流，但方向
+		// 相反。每个带长度前缀的帧都会解码到这个信封结构中。
 		var env struct {
 			Type  protocol.ControlMessageType `json:"type"`
 			Rules []protocol.Rule             `json:"rules"`
@@ -260,7 +251,7 @@ func (c *Client) rulesLoop(ctx context.Context, ctrlStream net.Conn) {
 				c.OnRules(env.Rules)
 			}
 		case protocol.MsgHeartbeatAck:
-			// informational only
+			// 仅供参考，无需处理
 		default:
 			c.Logger.Debug("unexpected message on control stream", "type", env.Type)
 		}

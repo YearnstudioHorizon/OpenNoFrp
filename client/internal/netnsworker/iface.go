@@ -5,10 +5,9 @@ import (
 	"net"
 )
 
-// netInterfacesExcludingLoopback lists network interface names in the
-// current network namespace, excluding "lo". Must be called from within a
-// RunInNamespace callback to reflect the target namespace's interfaces,
-// not the host's.
+// netInterfacesExcludingLoopback 列出当前网络命名空间中的网络接口名称（不含
+// "lo"）。必须在 RunInNamespace 回调中调用，才能反映目标命名空间（而非宿主机）
+// 的接口。
 func netInterfacesExcludingLoopback() ([]string, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
