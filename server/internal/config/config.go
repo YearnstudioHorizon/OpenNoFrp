@@ -47,6 +47,16 @@ type ServerConfig struct {
 	// TLSCertPath / TLSKeyPath 用于控制通道的 TLS 自签名证书与私钥
 	TLSCertPath string `toml:"tls_cert_path"`
 	TLSKeyPath  string `toml:"tls_key_path"`
+
+	// ACME（Let's Encrypt 等）自动证书设置，供 HTTPS 规则使用。
+	// ACMEEmail 为证书到期/吊销通知邮箱（可为空）。
+	ACMEEmail string `toml:"acme_email"`
+	// ACMECacheDir 保存已签发证书与 ACME 账户密钥的目录。
+	ACMECacheDir string `toml:"acme_cache_dir"`
+	// ACMEDirectoryURL 为 ACME 目录地址，留空使用 Let's Encrypt 生产环境。
+	ACMEDirectoryURL string `toml:"acme_directory_url"`
+	// ACMEAcceptTOS 必须为 true 才会实际向 CA 申请证书（表示同意 CA 服务条款）。
+	ACMEAcceptTOS bool `toml:"acme_accept_tos"`
 }
 
 type LogConfig struct {
@@ -94,6 +104,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Server.TLSKeyPath == "" {
 		cfg.Server.TLSKeyPath = "/var/lib/opennofrp/server.key"
 	}
+	if cfg.Server.ACMECacheDir == "" {
+		cfg.Server.ACMECacheDir = "/var/lib/opennofrp/acme"
+	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
 	}
@@ -126,6 +139,13 @@ heartbeat_timeout_seconds = 30
 db_path = "/var/lib/opennofrp/opennofrp.db"
 client_bin_dir = "/opt/opennofrp/client-bins"
 # public_base_url = "https://frp.example.com:8080"  # used in generated install commands
+
+# ACME automatic certificates for HTTPS rules (Let's Encrypt by default).
+# Certificates are only requested when acme_accept_tos = true.
+# acme_email = "admin@example.com"
+# acme_cache_dir = "/var/lib/opennofrp/acme"
+# acme_directory_url = ""  # empty = Let's Encrypt production
+# acme_accept_tos = false
 
 [log]
 level = "info"

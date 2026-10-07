@@ -95,7 +95,11 @@ CREATE TABLE IF NOT EXISTS rules (
 	path_prefix TEXT NOT NULL DEFAULT '',
 	offline_page TEXT NOT NULL DEFAULT '',
 	ip_sources TEXT NOT NULL DEFAULT '',
-	trusted_proxies TEXT NOT NULL DEFAULT ''
+	trusted_proxies TEXT NOT NULL DEFAULT '',
+	tls_mode TEXT NOT NULL DEFAULT '',
+	tls_cert TEXT NOT NULL DEFAULT '',
+	tls_key TEXT NOT NULL DEFAULT '',
+	redirect_https TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS reserved_ports (
@@ -154,7 +158,11 @@ CREATE TABLE rules_new (
 	path_prefix TEXT NOT NULL DEFAULT '',
 	offline_page TEXT NOT NULL DEFAULT '',
 	ip_sources TEXT NOT NULL DEFAULT '',
-	trusted_proxies TEXT NOT NULL DEFAULT ''
+	trusted_proxies TEXT NOT NULL DEFAULT '',
+	tls_mode TEXT NOT NULL DEFAULT '',
+	tls_cert TEXT NOT NULL DEFAULT '',
+	tls_key TEXT NOT NULL DEFAULT '',
+	redirect_https TEXT NOT NULL DEFAULT ''
 );
 INSERT INTO rules_new (id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at)
 	SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at FROM rules;
@@ -189,7 +197,7 @@ func (s *Store) ensureRuleColumns() error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for _, col := range []string{"domains", "path_prefix", "offline_page", "ip_sources", "trusted_proxies"} {
+	for _, col := range []string{"domains", "path_prefix", "offline_page", "ip_sources", "trusted_proxies", "tls_mode", "tls_cert", "tls_key", "redirect_https"} {
 		if have[col] {
 			continue
 		}
@@ -546,6 +554,17 @@ type Rule struct {
 	// TrustedProxies 是逗号分隔的 CIDR/IP 列表：只有当 TCP 对端地址属于其中之一时
 	// 才信任请求头中的 IP。为空表示信任任意对端（适用于前面一定有 CDN 的场景）。
 	TrustedProxies string
+	// TLSMode 决定 HTTP 规则所在端口是否终止 TLS（HTTPS）：
+	//   ""       = 明文 HTTP；
+	//   "acme"   = 按 Domains 通过 ACME 自动申请/续期证书；
+	//   "custom" = 使用 TLSCert/TLSKey 中上传的 PEM 证书与私钥。
+	// 同一端口上的 HTTP 规则必须使用一致的“是否 TLS”设置。
+	TLSMode string
+	TLSCert string // PEM 证书链（TLSMode = "custom"）
+	TLSKey  string // PEM 私钥（TLSMode = "custom"）
+	// RedirectHTTPS 为 "1" 时，明文 HTTP 端口（80）上匹配该规则域名的请求会被
+	// 301 跳转到 HTTPS。仅在 TLSMode 非空时有意义。
+	RedirectHTTPS string
 }
 
 // CreateRule 为某个 Client 添加一条新规则。默认以禁用状态创建
@@ -554,10 +573,10 @@ type Rule struct {
 // 内网服务尚未启动时）而不让其生效。
 func (s *Store) CreateRule(ctx context.Context, r Rule) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO rules (client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO rules (client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ClientID, r.Name, r.Protocol, r.LocalIP, r.LocalPort, r.RemotePort, boolToInt(r.PreserveSourceIP), boolToInt(r.Enabled), time.Now().Unix(),
-		r.Domains, r.PathPrefix, r.OfflinePage, r.IPSources, r.TrustedProxies)
+		r.Domains, r.PathPrefix, r.OfflinePage, r.IPSources, r.TrustedProxies, r.TLSMode, r.TLSCert, r.TLSKey, r.RedirectHTTPS)
 	if err != nil {
 		return 0, fmt.Errorf("store: create rule: %w", err)
 	}
@@ -569,10 +588,12 @@ func (s *Store) CreateRule(ctx context.Context, r Rule) (int64, error) {
 func (s *Store) UpdateRule(ctx context.Context, r Rule) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE rules SET name = ?, protocol = ?, local_ip = ?, local_port = ?, remote_port = ?, preserve_source_ip = ?, enabled = ?,
-		 domains = ?, path_prefix = ?, offline_page = ?, ip_sources = ?, trusted_proxies = ?
+		 domains = ?, path_prefix = ?, offline_page = ?, ip_sources = ?, trusted_proxies = ?,
+		 tls_mode = ?, tls_cert = ?, tls_key = ?, redirect_https = ?
 		 WHERE id = ?`,
 		r.Name, r.Protocol, r.LocalIP, r.LocalPort, r.RemotePort, boolToInt(r.PreserveSourceIP), boolToInt(r.Enabled),
-		r.Domains, r.PathPrefix, r.OfflinePage, r.IPSources, r.TrustedProxies, r.ID)
+		r.Domains, r.PathPrefix, r.OfflinePage, r.IPSources, r.TrustedProxies,
+		r.TLSMode, r.TLSCert, r.TLSKey, r.RedirectHTTPS, r.ID)
 	if err != nil {
 		return fmt.Errorf("store: update rule: %w", err)
 	}
@@ -601,7 +622,7 @@ func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 // GetRule 按 ID 返回单条规则。
 func (s *Store) GetRule(ctx context.Context, id int64) (Rule, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies FROM rules WHERE id = ?`, id)
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https FROM rules WHERE id = ?`, id)
 	return scanRule(row)
 }
 
@@ -609,7 +630,7 @@ func (s *Store) GetRule(ctx context.Context, id int64) (Rule, error) {
 // 面板中按 Client 划分的规则管理页面使用。
 func (s *Store) ListRulesForClient(ctx context.Context, clientID string) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https
 		 FROM rules WHERE client_id = ? ORDER BY created_at`, clientID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list rules for client: %w", err)
@@ -623,7 +644,7 @@ func (s *Store) ListRulesForClient(ctx context.Context, clientID string) ([]Rule
 // listener.Manager 应为其打开公网监听器的集合。
 func (s *Store) ListEnabledRulesForClient(ctx context.Context, clientID string) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https
 		 FROM rules WHERE client_id = ? AND enabled = 1 ORDER BY created_at`, clientID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list enabled rules for client: %w", err)
@@ -638,7 +659,7 @@ func (s *Store) ListEnabledRulesForClient(ctx context.Context, clientID string) 
 // 不仅仅由在线 Client 的握手驱动，参见 docs/03-product-design.md。
 func (s *Store) ListAllEnabledRules(ctx context.Context) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https
 		 FROM rules WHERE enabled = 1 ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list all enabled rules: %w", err)
@@ -671,7 +692,7 @@ func (s *Store) RemotePortInUse(ctx context.Context, remotePort uint16, excludeR
 // 无冲突时返回 (nil, nil)；有冲突时返回与之冲突的现有规则。
 func (s *Store) RuleConflict(ctx context.Context, c Rule) (*Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https
 		 FROM rules WHERE remote_port = ? AND id != ?`, c.RemotePort, c.ID)
 	if err != nil {
 		return nil, fmt.Errorf("store: check rule conflict: %w", err)
@@ -695,6 +716,10 @@ func usesUDP(proto string) bool { return proto == "udp" || proto == "tcp+udp" }
 
 func rulesConflict(a, b Rule) bool {
 	if a.Protocol == "http" && b.Protocol == "http" {
+		// 同一端口要么全部是 HTTPS（终止 TLS），要么全部是明文 HTTP。
+		if (a.TLSMode != "") != (b.TLSMode != "") {
+			return true
+		}
 		if NormalizePathPrefix(a.PathPrefix) != NormalizePathPrefix(b.PathPrefix) {
 			return false
 		}
@@ -753,7 +778,7 @@ func scanRule(row *sql.Row) (Rule, error) {
 	var r Rule
 	var preserve, enabled int
 	var createdAt int64
-	err := row.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt, &r.Domains, &r.PathPrefix, &r.OfflinePage, &r.IPSources, &r.TrustedProxies)
+	err := row.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt, &r.Domains, &r.PathPrefix, &r.OfflinePage, &r.IPSources, &r.TrustedProxies, &r.TLSMode, &r.TLSCert, &r.TLSKey, &r.RedirectHTTPS)
 	if err != nil {
 		return Rule{}, err
 	}
@@ -769,7 +794,7 @@ func scanRules(rows *sql.Rows) ([]Rule, error) {
 		var r Rule
 		var preserve, enabled int
 		var createdAt int64
-		if err := rows.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt, &r.Domains, &r.PathPrefix, &r.OfflinePage, &r.IPSources, &r.TrustedProxies); err != nil {
+		if err := rows.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt, &r.Domains, &r.PathPrefix, &r.OfflinePage, &r.IPSources, &r.TrustedProxies, &r.TLSMode, &r.TLSCert, &r.TLSKey, &r.RedirectHTTPS); err != nil {
 			return nil, fmt.Errorf("store: scan rule: %w", err)
 		}
 		r.PreserveSourceIP = preserve != 0

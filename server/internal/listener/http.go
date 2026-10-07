@@ -15,6 +15,7 @@ package listener
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"html/template"
@@ -46,14 +47,34 @@ type httpRoute struct {
 	IPSources []string
 	// TrustedProxies 非空时，仅当 TCP 对端属于其中之一才信任请求头中的 IP。
 	TrustedProxies []*net.IPNet
+	// TLS 相关（见 tls.go）。
+	TLSMode       string
+	TLSCert       string
+	TLSKey        string
+	RedirectHTTPS bool
+	HTTPSPort     uint16 // 该规则所在的 HTTPS 端口，供 80 端口跳转使用
+
+	// cert 是 custom 模式下已解析的证书（解析失败或非 custom 模式为 nil）。
+	cert *tls.Certificate
 }
 
 type httpListener struct {
 	port   uint16
 	ln     net.Listener
 	srv    *http.Server
+	tls    bool // 该端口是否终止 TLS（HTTPS）
 	mu     sync.RWMutex
 	routes []httpRoute
+}
+
+// routesWantTLS 报告一组路由是否要求该端口以 HTTPS 方式监听。
+func routesWantTLS(routes []httpRoute) bool {
+	for _, r := range routes {
+		if r.TLSMode != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (hl *httpListener) setRoutes(routes []httpRoute) {
@@ -190,6 +211,16 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil {
+			// 明文端口：先应答 ACME HTTP-01 挑战，再处理 HTTPS 强制跳转。
+			if m.serveACMEChallenge(w, r) {
+				return
+			}
+			if httpsPort, ok := m.redirectTarget(r.Host); ok {
+				serveRedirect(w, r, httpsPort)
+				return
+			}
+		}
 		hl.mu.RLock()
 		route, ok := matchRoute(hl.routes, r.Host, r.URL.Path)
 		hl.mu.RUnlock()
@@ -266,11 +297,18 @@ func serveNotFound(w http.ResponseWriter, host string) {
 
 // openHTTPPort 打开（或更新）某个端口上的 HTTP 监听器并设置其路由表。
 func (m *Manager) openHTTPPort(port uint16, routes []httpRoute) error {
+	wantTLS := routesWantTLS(routes)
 	m.mu.Lock()
 	if hl, ok := m.http[port]; ok {
+		if hl.tls == wantTLS {
+			m.mu.Unlock()
+			hl.setRoutes(routes)
+			return nil
+		}
+		// HTTP <-> HTTPS 切换：关闭旧监听器后以新模式重新打开。
 		m.mu.Unlock()
-		hl.setRoutes(routes)
-		return nil
+		m.closeHTTPPort(port)
+		m.mu.Lock()
 	}
 	if _, ok := m.tcp[port]; ok {
 		m.mu.Unlock()
@@ -282,12 +320,18 @@ func (m *Manager) openHTTPPort(port uint16, routes []httpRoute) error {
 		m.mu.Unlock()
 		return fmt.Errorf("listener: http listen on %s: %w", addr, err)
 	}
-	hl := &httpListener{port: port, ln: ln}
+	hl := &httpListener{port: port, tls: wantTLS}
 	hl.setRoutes(routes)
+	if wantTLS {
+		ln = tls.NewListener(ln, m.tlsConfigFor(hl))
+	}
+	hl.ln = ln
 	hl.srv = &http.Server{
 		Handler:           m.newHTTPHandler(hl),
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		// 禁用 HTTP/2 自动协商（tls.Config.NextProtos 仅含 http/1.1），保证 WebSocket 可用。
+		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 	}
 	m.http[port] = hl
 	m.mu.Unlock()
@@ -323,7 +367,7 @@ func (m *Manager) reconcileHTTP(desired []RuleView) {
 		if r.Protocol != "http" {
 			continue
 		}
-		byPort[r.Port] = append(byPort[r.Port], httpRoute{
+		route := httpRoute{
 			RuleID:         r.ID,
 			ClientID:       r.ClientID,
 			Name:           r.Name,
@@ -332,7 +376,28 @@ func (m *Manager) reconcileHTTP(desired []RuleView) {
 			OfflinePage:    r.OfflinePage,
 			IPSources:      r.IPSources,
 			TrustedProxies: r.TrustedProxies,
-		})
+			TLSMode:        r.TLSMode,
+			TLSCert:        r.TLSCert,
+			TLSKey:         r.TLSKey,
+			RedirectHTTPS:  r.RedirectHTTPS,
+			HTTPSPort:      r.Port,
+		}
+		if r.TLSMode == "custom" {
+			c, err := parseRouteCert(r.TLSCert, r.TLSKey)
+			if err != nil {
+				m.Logger.Warn("https rule has an invalid certificate", "rule_id", r.ID, "error", err)
+			} else {
+				route.cert = c
+			}
+		}
+		byPort[r.Port] = append(byPort[r.Port], route)
+	}
+	// 有规则要求 HTTPS 跳转时，确保明文 80 端口上有 HTTP 监听器（即使没有
+	// 规则直接挂在 80 上，它也会负责跳转与 ACME HTTP-01 挑战）。
+	if m.updateTLSState(desired) {
+		if _, ok := byPort[80]; !ok {
+			byPort[80] = []httpRoute{}
+		}
 	}
 	m.mu.Lock()
 	var stale []uint16

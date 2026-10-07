@@ -136,6 +136,12 @@ func runServer() {
 		sessions: make(map[string]*session.Session),
 	}
 	s.listener = listener.NewManager(cfg.Server.BindAddr, logger, s.sessionFor)
+	s.listener.SetACME(listener.ACMEConfig{
+		Email:        cfg.Server.ACMEEmail,
+		CacheDir:     cfg.Server.ACMECacheDir,
+		DirectoryURL: cfg.Server.ACMEDirectoryURL,
+		AcceptTOS:    cfg.Server.ACMEAcceptTOS,
+	})
 
 	// 保留 SSH（及类似的主机管理）端口，确保已启用的规则永远不会与运维人员
 	// 自身进入该主机的访问通道发生冲突。
@@ -272,6 +278,10 @@ func (s *server) reconcileListeners(ctx context.Context) {
 			v.OfflinePage = r.OfflinePage
 			v.IPSources = listener.ParseIPSources(r.IPSources)
 			v.TrustedProxies, _ = listener.ParseTrustedProxies(r.TrustedProxies)
+			v.TLSMode = r.TLSMode
+			v.TLSCert = r.TLSCert
+			v.TLSKey = r.TLSKey
+			v.RedirectHTTPS = r.RedirectHTTPS == "1"
 		}
 		desired = append(desired, v)
 	}

@@ -242,6 +242,16 @@ func friendlyMsg(s string) string {
 		return "自定义不可用页面过大（上限 64 KB）"
 	case "rule saved":
 		return "规则已保存"
+	case "acme needs domain":
+		return "自动证书（ACME）至少需要绑定一个非通配的精确域名"
+	case "tls cert required":
+		return "自定义证书模式需要同时填写 PEM 证书和私钥"
+	case "bad tls cert":
+		return "证书或私钥无法解析，或二者不匹配，请检查 PEM 内容"
+	case "bad tls mode":
+		return "HTTPS 模式无效"
+	case "redirect needs domain":
+		return "开启 HTTP→HTTPS 跳转需要绑定至少一个域名"
 	case "password too short":
 		return "新密码长度至少 6 位"
 	case "invalid current password":
@@ -472,6 +482,47 @@ func (p *Panel) parseRuleForm(r *http.Request, clientID string, excludeID int64)
 		rule.TrustedProxies = strings.Join(strings.FieldsFunc(trusted, func(c rune) bool {
 			return c == ',' || c == ' ' || c == ';' || c == '\n' || c == '\r' || c == '\t'
 		}), ",")
+
+		// HTTPS：tls_mode = "" / "acme" / "custom"。
+		tlsMode := strings.TrimSpace(r.FormValue("tls_mode"))
+		switch tlsMode {
+		case "":
+		case "acme":
+			hasExact := false
+			for _, d := range domains {
+				if !strings.HasPrefix(d, "*.") {
+					hasExact = true
+				}
+			}
+			if !hasExact {
+				return store.Rule{}, "acme needs domain"
+			}
+		case "custom":
+			certPEM := strings.TrimSpace(r.FormValue("tls_cert"))
+			keyPEM := strings.TrimSpace(r.FormValue("tls_key"))
+			if certPEM == "" && keyPEM == "" && excludeID > 0 {
+				// 编辑时留空表示沿用已保存的证书。
+				if old, err := p.Store.GetRule(r.Context(), excludeID); err == nil && old.TLSMode == "custom" {
+					certPEM, keyPEM = old.TLSCert, old.TLSKey
+				}
+			}
+			if certPEM == "" || keyPEM == "" {
+				return store.Rule{}, "tls cert required"
+			}
+			if err := listener.ValidateCertPair(certPEM, keyPEM); err != nil {
+				return store.Rule{}, "bad tls cert"
+			}
+			rule.TLSCert, rule.TLSKey = certPEM, keyPEM
+		default:
+			return store.Rule{}, "bad tls mode"
+		}
+		rule.TLSMode = tlsMode
+		if tlsMode != "" && r.FormValue("redirect_https") == "1" {
+			if len(domains) == 0 {
+				return store.Rule{}, "redirect needs domain"
+			}
+			rule.RedirectHTTPS = "1"
+		}
 	}
 	conflict, err := p.Store.RuleConflict(r.Context(), rule)
 	if err != nil {

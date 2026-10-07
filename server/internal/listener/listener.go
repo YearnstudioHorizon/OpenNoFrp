@@ -33,6 +33,12 @@ type RuleView struct {
 	IPSources []string
 	// TrustedProxies 非空时，仅当 TCP 对端属于其中之一才信任请求头中的 IP。
 	TrustedProxies []*net.IPNet
+	// TLSMode："" = 明文 HTTP，"acme" = 自动证书，"custom" = 使用 TLSCert/TLSKey。
+	TLSMode string
+	TLSCert string
+	TLSKey  string
+	// RedirectHTTPS 为 true 时，在明文 80 端口上把该规则域名的请求 301 跳转到 HTTPS。
+	RedirectHTTPS bool
 }
 
 // expandRule 将一条双栈（"tcp+udp"）规则拆分为一个 TCP 视图和一个 UDP
@@ -63,6 +69,9 @@ type Manager struct {
 	tcp  map[uint16]*tcpListener
 	udp  map[uint16]*udpListener
 	http map[uint16]*httpListener
+
+	// tlsst 保存 ACME 管理器、ACME 允许域名与 HTTPS 跳转表（见 tls.go）。
+	tlsst tlsState
 }
 
 type tcpListener struct {

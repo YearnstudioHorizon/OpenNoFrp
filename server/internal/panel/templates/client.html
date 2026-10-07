@@ -67,6 +67,7 @@
               {{if eq .Protocol "http"}}
                 <div class="route-info mono">{{if .Domains}}{{.Domains}}{{else}}任意域名{{end}}{{if .PathPrefix}}{{.PathPrefix}}{{else}}/{{end}}</div>
                 {{if .OfflinePage}}<div class="route-info">自定义不可用页面</div>{{end}}
+                {{if .TLSMode}}<div class="route-info"><span class="badge badge-amber">HTTPS</span> {{if eq .TLSMode "acme"}}自动证书{{else}}自定义证书{{end}}{{if eq .RedirectHTTPS "1"}} · 80 端口跳转{{end}}</div>{{end}}
                 <div class="route-info">IP 来源：<span class="mono">{{if .IPSources}}{{.IPSources}}{{else}}remote_addr{{end}}</span>{{if .TrustedProxies}} · 可信代理：<span class="mono">{{.TrustedProxies}}</span>{{end}}</div>
               {{end}}
             </td>
@@ -183,6 +184,25 @@
             <input id="f-trusted" name="trusted_proxies" value="{{if $e}}{{$e.TrustedProxies}}{{end}}" placeholder="例如：173.245.48.0/20, 103.21.244.0/22">
             <span class="help">填写后，只有来自这些地址的请求才信任请求头中的 IP，其它请求一律使用 TCP 对端地址并剥离伪造的 IP 头。留空表示信任所有请求头（仅在前面一定有 CDN / 反代时使用）。</span>
           </div>
+          <div class="field" data-proto-show="http">
+            <label for="f-tlsmode">HTTPS</label>
+            <select id="f-tlsmode" name="tls_mode">
+              <option value="" {{if $e}}{{if eq $e.TLSMode ""}}selected{{end}}{{end}}>关闭（明文 HTTP）</option>
+              <option value="acme" {{if $e}}{{if eq $e.TLSMode "acme"}}selected{{end}}{{end}}>自动证书（ACME / Let's Encrypt）</option>
+              <option value="custom" {{if $e}}{{if eq $e.TLSMode "custom"}}selected{{end}}{{end}}>上传自定义证书</option>
+            </select>
+            <span class="help">开启后该公网端口以 HTTPS 监听（通常为 443），同一端口上的 HTTP 规则须统一开启或关闭。ACME 需在 server.toml 中设置 acme_accept_tos = true，且只为精确域名申请证书。</span>
+          </div>
+          <div class="check-stack" data-proto-show="http">
+            <label class="check"><input type="checkbox" name="redirect_https" value="1" {{if $e}}{{if eq $e.RedirectHTTPS "1"}}checked{{end}}{{end}}>HTTP 自动跳转 HTTPS（80 端口）</label>
+          </div>
+          <div class="field span-all tls-custom" data-proto-show="http">
+            <label for="f-tlscert">证书（PEM，含中间证书链）</label>
+            <textarea id="f-tlscert" name="tls_cert" rows="4" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+            <label for="f-tlskey">私钥（PEM）</label>
+            <textarea id="f-tlskey" name="tls_key" rows="4" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+            <span class="help">仅“上传自定义证书”模式使用。{{if $e}}{{if eq $e.TLSMode "custom"}}已保存证书，留空则保持不变。{{end}}{{end}}</span>
+          </div>
 
           <div class="check-stack">
             <label class="check" data-proto-show="http tcp tcp+udp"><input type="checkbox" name="preserve_source_ip" value="1" {{if $e}}{{if $e.PreserveSourceIP}}checked{{end}}{{else}}checked{{end}}>保留来源 IP</label>
@@ -228,6 +248,22 @@
     r.addEventListener('change', apply);
   });
 
+  // HTTPS：仅在“上传自定义证书”模式下显示证书/私钥输入框。
+  var tlsMode = document.getElementById('f-tlsmode');
+  function applyTLS() {
+    if (!tlsMode) return;
+    var isHTTP = current() === 'http';
+    form.querySelectorAll('.tls-custom').forEach(function (el) {
+      var show = isHTTP && tlsMode.value === 'custom';
+      el.hidden = !show;
+      el.querySelectorAll('textarea').forEach(function (i) { i.disabled = !show; });
+    });
+  }
+  if (tlsMode) tlsMode.addEventListener('change', applyTLS);
+  form.querySelectorAll('input[name=protocol]').forEach(function (r) {
+    r.addEventListener('change', applyTLS);
+  });
+
   // 真实 IP 来源：点击按钮按顺序追加到输入框（去重），“清空”重置。
   var ipsrc = document.getElementById('f-ipsrc');
   var chips = document.getElementById('ipsrc-chips');
@@ -243,6 +279,7 @@
     });
   }
   apply();
+  applyTLS();
 })();
 </script>
 </body>
