@@ -25,6 +25,10 @@ type ServerConfig struct {
 	// PanelAddr/PanelPort 用于提供管理后台 Web UI。
 	PanelAddr string `toml:"panel_addr"` // 例如 "0.0.0.0"
 	PanelPort int    `toml:"panel_port"` // 例如 8080
+	// PanelTLSCert / PanelTLSKey 同时设置时，面板以 HTTPS 方式提供服务（PEM 文件路径）。
+	// 留空则使用明文 HTTP（建议仅在内网或前置反代时使用）。
+	PanelTLSCert string `toml:"panel_tls_cert"`
+	PanelTLSKey  string `toml:"panel_tls_key"`
 
 	// HeartbeatTimeoutSeconds：如果在这么多秒内没有收到某个 Client 的心跳
 	// （或任何流活动），Server 就认为它已断开连接。其公网监听仍保持开启
@@ -119,6 +123,9 @@ func validate(cfg *Config) error {
 	if cfg.Server.PanelPort <= 0 || cfg.Server.PanelPort > 65535 {
 		return fmt.Errorf("server.panel_port must be 1-65535, got %d", cfg.Server.PanelPort)
 	}
+	if (cfg.Server.PanelTLSCert == "") != (cfg.Server.PanelTLSKey == "") {
+		return fmt.Errorf("server.panel_tls_cert and server.panel_tls_key must be set together")
+	}
 	return nil
 }
 
@@ -134,6 +141,9 @@ control_port = 17000
 
 panel_addr = "0.0.0.0"
 panel_port = 8080
+# Serve the admin panel over HTTPS (PEM file paths; both must be set together).
+# panel_tls_cert = "/etc/opennofrp/panel.crt"
+# panel_tls_key = "/etc/opennofrp/panel.key"
 
 heartbeat_timeout_seconds = 30
 db_path = "/var/lib/opennofrp/opennofrp.db"

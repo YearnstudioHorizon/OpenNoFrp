@@ -190,9 +190,32 @@ func runServer() {
 		<-ctx.Done()
 		httpSrv.Shutdown(context.Background())
 	}()
+	// 定期清理过期的面板登录会话。
 	go func() {
-		logger.Info("admin panel serving", "addr", panelAddr)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			if err := st.PurgeExpiredPanelSessions(ctx); err != nil {
+				logger.Warn("failed to purge expired panel sessions", "error", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	go func() {
+		var err error
+		if cfg.Server.PanelTLSCert != "" && cfg.Server.PanelTLSKey != "" {
+			logger.Info("admin panel serving (HTTPS)", "addr", panelAddr)
+			httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+			err = httpSrv.ListenAndServeTLS(cfg.Server.PanelTLSCert, cfg.Server.PanelTLSKey)
+		} else {
+			logger.Info("admin panel serving", "addr", panelAddr)
+			err = httpSrv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			logger.Error("panel http server failed", "error", err)
 		}
 	}()

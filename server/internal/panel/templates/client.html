@@ -16,7 +16,7 @@
   </div>
   <div class="spacer"></div>
   <nav><a href="/">← 返回列表</a></nav>
-  <form method="post" action="/logout"><button class="btn btn-ghost btn-sm" type="submit">退出登录</button></form>
+  <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{$.CSRF}}"><button class="btn btn-ghost btn-sm" type="submit">退出登录</button></form>
 </header>
 
 <main class="container">
@@ -33,11 +33,11 @@
       <div class="hint"><span class="tag-id">{{.Client.ID}}</span> &nbsp;·&nbsp; 最近心跳：{{.Client.LastSeen}}</div>
     </div>
     <div class="btn-row">
-      <form class="inline" method="post" action="/clients/{{.Client.ID}}/rename">
+      <form class="inline" method="post" action="/clients/{{.Client.ID}}/rename"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
         <input name="name" value="{{.Client.Name}}" style="width:170px;display:inline-block" aria-label="机器名称">
         <button class="btn btn-sm" type="submit" style="margin-left:6px">重命名</button>
       </form>
-      <form class="inline" method="post" action="/clients/{{.Client.ID}}/delete" onsubmit="return confirm('确定删除这台机器及其全部转发规则？此操作不可恢复。')">
+      <form class="inline" method="post" action="/clients/{{.Client.ID}}/delete" onsubmit="return confirm('确定删除这台机器及其全部转发规则？此操作不可恢复。')"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
         <button class="btn btn-danger btn-sm" type="submit">删除机器</button>
       </form>
     </div>
@@ -77,10 +77,10 @@
             <td>
               <div class="btn-row">
                 <a class="btn btn-sm" href="/clients/{{$.Client.ID}}?edit={{.ID}}#rule-form">编辑</a>
-                <form class="inline" method="post" action="/rules/{{.ID}}/toggle">
+                <form class="inline" method="post" action="/rules/{{.ID}}/toggle"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
                   <button class="btn btn-sm" type="submit">{{if .Enabled}}停用{{else}}启用{{end}}</button>
                 </form>
-                <form class="inline" method="post" action="/rules/{{.ID}}/delete" onsubmit="return confirm('确定删除该规则？公网入口将立即关闭。')">
+                <form class="inline" method="post" action="/rules/{{.ID}}/delete" onsubmit="return confirm('确定删除该规则？公网入口将立即关闭。')"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
                   <button class="btn btn-danger btn-sm" type="submit">删除</button>
                 </form>
               </div>
@@ -99,11 +99,11 @@
     {{if $e}}
     <h2>编辑规则 #{{$e.ID}}</h2>
     <p class="desc">修改后立即生效；如修改了公网端口，旧端口会被关闭。 <a href="/clients/{{.Client.ID}}">取消编辑</a></p>
-    <form method="post" action="/rules/{{$e.ID}}/edit" id="rule-editor">
+    <form method="post" action="/rules/{{$e.ID}}/edit" id="rule-editor"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
     {{else}}
     <h2>新建规则</h2>
     <p class="desc">第一步选择协议，第二步填写端口等信息。流量路径：访问者 → 服务器公网端口 → 内网机器 → 本地服务端口。</p>
-    <form method="post" action="/clients/{{.Client.ID}}/rules" id="rule-editor">
+    <form method="post" action="/clients/{{.Client.ID}}/rules" id="rule-editor"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
     {{end}}
 
       <div class="step-title"><span class="step-no">1</span>选择协议</div>

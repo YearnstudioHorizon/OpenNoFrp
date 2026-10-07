@@ -16,7 +16,7 @@
   </div>
   <div class="spacer"></div>
   <nav><a href="#clients">内网机器</a><a href="#reserved">保留端口</a></nav>
-  <form method="post" action="/logout"><button class="btn btn-ghost btn-sm" type="submit">退出登录</button></form>
+  <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="btn btn-ghost btn-sm" type="submit">退出登录</button></form>
 </header>
 
 <main class="container">
@@ -71,7 +71,7 @@
   <section class="card">
     <h2>接入新机器</h2>
     <p class="desc">生成一条一次性安装命令，在目标内网机器上执行即可完成注册（令牌只能使用一次）。</p>
-    <form method="post" action="/register-token">
+    <form method="post" action="/register-token"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <div class="form-grid">
         <div class="field">
           <label for="label">机器备注</label>
@@ -111,7 +111,7 @@
             <td><span class="port">{{$port}}</span></td>
             <td>{{$reason}}</td>
             <td>
-              <form class="inline" method="post" action="/reserved/remove">
+              <form class="inline" method="post" action="/reserved/remove"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
                 <input type="hidden" name="port" value="{{$port}}">
                 <button class="btn btn-danger btn-sm" type="submit">移除</button>
               </form>
@@ -123,7 +123,7 @@
         </tbody>
       </table>
     </div>
-    <form method="post" action="/reserved/add" style="margin-top:14px">
+    <form method="post" action="/reserved/add" style="margin-top:14px"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <div class="form-grid" style="max-width:520px">
         <div class="field"><label for="rport">端口</label><input id="rport" name="port" placeholder="22" inputmode="numeric"></div>
         <div class="field"><label for="rreason">原因</label><input id="rreason" name="reason" placeholder="SSH 远程登录"></div>
@@ -135,7 +135,7 @@
   <section class="card">
     <h2>修改管理员密码</h2>
     <p class="desc">为了账号安全，修改密码需要输入当前密码，且新密码长度至少 6 位。</p>
-    <form method="post" action="/admin/password" style="max-width:340px">
+    <form method="post" action="/admin/password" style="max-width:340px"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <div class="field">
         <input name="current_password" type="password" placeholder="输入当前旧密码" autocomplete="current-password" required style="margin-bottom:8px">
         <input name="new_password" type="password" placeholder="输入新密码 (至少6位)" autocomplete="new-password" required>

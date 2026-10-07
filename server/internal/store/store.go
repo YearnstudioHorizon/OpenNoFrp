@@ -113,6 +113,13 @@ CREATE TABLE IF NOT EXISTS reserved_ports (
 	port INTEGER PRIMARY KEY,
 	reason TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS panel_sessions (
+	token_hash TEXT PRIMARY KEY,
+	csrf_token TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL
+);
 `
 	_, err := s.db.Exec(schema)
 	if err != nil {
@@ -322,6 +329,69 @@ func (s *Store) SetAdminPassword(ctx context.Context, newPassword string) error 
 	_, err = s.db.ExecContext(ctx, `UPDATE admin SET password_hash = ? WHERE id = 1`, string(hash))
 	if err != nil {
 		return fmt.Errorf("store: update admin password: %w", err)
+	}
+	return nil
+}
+
+// ---- 面板登录会话 ----------------------------------------------------------
+//
+// 会话持久化在 SQLite 中，Server 重启后已登录的管理员无需重新登录。数据库中只
+// 保存会话 Cookie 的 SHA-256 哈希，数据库泄露也无法直接冒用会话。
+
+// CreatePanelSession 保存一个新的面板会话。
+func (s *Store) CreatePanelSession(ctx context.Context, tokenHash, csrfToken string, expiresAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO panel_sessions (token_hash, csrf_token, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+		tokenHash, csrfToken, time.Now().Unix(), expiresAt.Unix())
+	if err != nil {
+		return fmt.Errorf("store: create panel session: %w", err)
+	}
+	return nil
+}
+
+// GetPanelSession 返回会话的 CSRF 令牌与过期时间；不存在或已过期时 ok 为 false
+// （已过期的会话会被顺带删除）。
+func (s *Store) GetPanelSession(ctx context.Context, tokenHash string) (csrfToken string, expiresAt time.Time, ok bool, err error) {
+	var exp int64
+	err = s.db.QueryRowContext(ctx,
+		`SELECT csrf_token, expires_at FROM panel_sessions WHERE token_hash = ?`, tokenHash).Scan(&csrfToken, &exp)
+	if err == sql.ErrNoRows {
+		return "", time.Time{}, false, nil
+	}
+	if err != nil {
+		return "", time.Time{}, false, fmt.Errorf("store: get panel session: %w", err)
+	}
+	expiresAt = time.Unix(exp, 0)
+	if time.Now().After(expiresAt) {
+		_ = s.DeletePanelSession(ctx, tokenHash)
+		return "", time.Time{}, false, nil
+	}
+	return csrfToken, expiresAt, true, nil
+}
+
+// DeletePanelSession 删除一个面板会话（退出登录）。
+func (s *Store) DeletePanelSession(ctx context.Context, tokenHash string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM panel_sessions WHERE token_hash = ?`, tokenHash)
+	if err != nil {
+		return fmt.Errorf("store: delete panel session: %w", err)
+	}
+	return nil
+}
+
+// DeleteAllPanelSessions 删除全部面板会话（修改密码后踢出所有已登录会话）。
+func (s *Store) DeleteAllPanelSessions(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM panel_sessions`)
+	if err != nil {
+		return fmt.Errorf("store: delete all panel sessions: %w", err)
+	}
+	return nil
+}
+
+// PurgeExpiredPanelSessions 清理已过期的面板会话。
+func (s *Store) PurgeExpiredPanelSessions(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM panel_sessions WHERE expires_at < ?`, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("store: purge panel sessions: %w", err)
 	}
 	return nil
 }

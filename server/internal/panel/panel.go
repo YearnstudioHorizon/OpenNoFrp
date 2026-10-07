@@ -5,7 +5,10 @@
 package panel
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -65,7 +68,6 @@ type Panel struct {
 	tmpl *template.Template
 
 	mu            sync.Mutex
-	sessions      map[string]time.Time
 	loginAttempts map[string]*loginAttempt // IP -> 登录失败限速
 }
 
@@ -75,7 +77,6 @@ func New(st *store.Store, logger *slog.Logger, onRules OnRulesChanged, baseURL, 
 		Store: st, Logger: logger, OnRules: onRules,
 		BaseURL: baseURL, ControlHost: controlHost, ControlPort: controlPort,
 		Fingerprint: fingerprint, ClientBinDir: clientBinDir, tmpl: tpl,
-		sessions:      map[string]time.Time{},
 		loginAttempts: map[string]*loginAttempt{},
 	}
 }
@@ -89,11 +90,18 @@ func (p *Panel) Handler() http.Handler {
 
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if !p.authed(r) {
+			csrf, ok := p.sessionCSRF(r)
+			if !ok {
 				http.Redirect(w, r, "/login", http.StatusSeeOther)
 				return
 			}
-			h(w, r)
+			// 所有会修改状态的 POST 请求都必须携带与会话绑定的 CSRF 令牌。
+			if r.Method == http.MethodPost && !checkCSRF(r, csrf) {
+				p.Logger.Warn("panel: rejected request with invalid csrf token", "path", r.URL.Path, "remote", r.RemoteAddr)
+				http.Error(w, "invalid or missing CSRF token, please reload the page", http.StatusForbidden)
+				return
+			}
+			h(w, r.WithContext(context.WithValue(r.Context(), csrfCtxKey{}, csrf)))
 		}
 	}
 
@@ -119,32 +127,74 @@ func (p *Panel) Handler() http.Handler {
 
 // ---- 认证 -----------------------------------------------------------------
 
-func (p *Panel) authed(r *http.Request) bool {
-	c, err := r.Cookie("onfr_session")
-	if err != nil || c.Value == "" {
-		return false
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	exp, ok := p.sessions[c.Value]
-	if !ok {
-		return false
-	}
-	if time.Now().After(exp) {
-		delete(p.sessions, c.Value)
-		return false
-	}
-	return true
+const (
+	sessionCookieName = "onfr_session"
+	sessionTTL        = 12 * time.Hour
+)
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
-func (p *Panel) setSessionCookie(w http.ResponseWriter) {
-	b := make([]byte, 16)
-	rand.Read(b)
-	tok := hex.EncodeToString(b)
-	p.mu.Lock()
-	p.sessions[tok] = time.Now().Add(12 * time.Hour)
-	p.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: "onfr_session", Value: tok, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
+// hashSessionToken 返回会话 Cookie 的 SHA-256 哈希；数据库中只保存该哈希。
+func hashSessionToken(tok string) string {
+	sum := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(sum[:])
+}
+
+// sessionCSRF 返回当前请求所属会话的 CSRF 令牌；未登录或会话已过期时 ok 为 false。
+func (p *Panel) sessionCSRF(r *http.Request) (string, bool) {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil || c.Value == "" {
+		return "", false
+	}
+	csrf, _, ok, err := p.Store.GetPanelSession(r.Context(), hashSessionToken(c.Value))
+	if err != nil {
+		p.Logger.Warn("panel: load session failed", "error", err)
+		return "", false
+	}
+	return csrf, ok
+}
+
+func (p *Panel) authed(r *http.Request) bool {
+	_, ok := p.sessionCSRF(r)
+	return ok
+}
+
+// csrfCtxKey 是请求上下文中保存当前会话 CSRF 令牌的键。
+type csrfCtxKey struct{}
+
+// csrfFrom 返回 auth 中间件放入请求上下文的 CSRF 令牌（供模板渲染隐藏字段）。
+func csrfFrom(r *http.Request) string {
+	s, _ := r.Context().Value(csrfCtxKey{}).(string)
+	return s
+}
+
+// checkCSRF 校验表单字段 csrf_token 或请求头 X-CSRF-Token 是否与会话令牌一致。
+func checkCSRF(r *http.Request, want string) bool {
+	if want == "" {
+		return false
+	}
+	got := r.Header.Get("X-CSRF-Token")
+	if got == "" {
+		got = r.FormValue("csrf_token")
+	}
+	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// setSessionCookie 创建一个新的持久化会话（含独立的 CSRF 令牌）并下发 Cookie。
+func (p *Panel) setSessionCookie(w http.ResponseWriter, r *http.Request) {
+	tok := randomHex(32)
+	csrf := randomHex(32)
+	if err := p.Store.CreatePanelSession(r.Context(), hashSessionToken(tok), csrf, time.Now().Add(sessionTTL)); err != nil {
+		p.Logger.Error("panel: create session failed", "error", err)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookieName, Value: tok, Path: "/", HttpOnly: true,
+		SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, MaxAge: int(sessionTTL / time.Second),
+	})
 }
 
 func (p *Panel) handleLoginGet(w http.ResponseWriter, r *http.Request) {
@@ -199,17 +249,17 @@ func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	delete(p.loginAttempts, clientIP)
 	p.mu.Unlock()
 
-	p.setSessionCookie(w)
+	p.setSessionCookie(w, r)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (p *Panel) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie("onfr_session"); err == nil {
-		p.mu.Lock()
-		delete(p.sessions, c.Value)
-		p.mu.Unlock()
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		if err := p.Store.DeletePanelSession(r.Context(), hashSessionToken(c.Value)); err != nil {
+			p.Logger.Warn("panel: delete session failed", "error", err)
+		}
 	}
-	http.SetCookie(w, &http.Cookie{Name: "onfr_session", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: r.TLS != nil})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
@@ -321,6 +371,7 @@ func (p *Panel) indexData(r *http.Request) map[string]any {
 		"Clients": rows, "Reserved": reserved,
 		"OnlineCount": onlineCount, "ClientCount": len(rows), "TotalRules": totalRules,
 		"Fingerprint": p.Fingerprint, "Version": version.Version,
+		"CSRF":   csrfFrom(r),
 		"Error":  friendlyMsg(r.URL.Query().Get("err")),
 		"Notice": friendlyMsg(r.URL.Query().Get("ok")),
 	}
@@ -408,6 +459,7 @@ func (p *Panel) handleClientPage(w http.ResponseWriter, r *http.Request) {
 		"Outdated":      outdated,
 		"Rules":         rules,
 		"EditRule":      editRule,
+		"CSRF":          csrfFrom(r),
 		"Error":         friendlyMsg(r.URL.Query().Get("err")),
 		"Notice":        friendlyMsg(r.URL.Query().Get("ok")),
 	})
@@ -756,12 +808,12 @@ func (p *Panel) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 密码修改成功，轮换并注销所有已有登录 Session（踢出潜在被盗用的其他会话）
-	p.mu.Lock()
-	p.sessions = make(map[string]time.Time)
-	p.mu.Unlock()
+	if err := p.Store.DeleteAllPanelSessions(r.Context()); err != nil {
+		p.Logger.Warn("panel: delete all sessions failed", "error", err)
+	}
 
 	// 为当前改密操作重新发放新 Session Cookie
-	p.setSessionCookie(w)
+	p.setSessionCookie(w, r)
 	http.Redirect(w, r, "/?ok=password+changed", http.StatusSeeOther)
 }
 
