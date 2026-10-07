@@ -144,6 +144,13 @@ type Rule struct {
 	LocalPort        uint16       `json:"local_port"`
 	RemotePort       uint16       `json:"remote_port"`
 	PreserveSourceIP bool         `json:"preserve_source_ip"`
+	// Backends 是除 LocalIP:LocalPort 之外的额外后端（"ip:port"），为空表示单后端。
+	// 旧版 Client 会忽略该字段，仅使用 LocalIP:LocalPort。
+	Backends []string `json:"backends,omitempty"`
+	// LBStrategy 是多后端选择策略：""/"round_robin" = 轮询，"random" = 随机，
+	// "failover" = 按顺序优先使用第一个健康后端。所有策略在拨号失败时都会依次
+	// 尝试其余后端；Client 会对多后端规则做周期性 TCP 健康检查并跳过不健康后端。
+	LBStrategy string `json:"lb_strategy,omitempty"`
 }
 
 // RulesSnapshot 由 Server 推送给已连接的 Client：握手成功后立即推送一次，此后在

@@ -245,6 +245,20 @@
             <span class="help">该公网端口上没有任何规则匹配请求的域名/路径时返回；同一端口多条规则都设置时取 ID 最小的一条。上限 64 KB。</span>
           </div>
 
+          <div class="field span-all" data-proto-show="http tls tcp tcp+udp">
+            <label for="f-backends">额外后端（多后端负载均衡，可选）</label>
+            <textarea id="f-backends" name="backends" rows="3" placeholder="192.168.1.11:8080&#10;192.168.1.12:8080">{{if $e}}{{$e.Backends}}{{end}}</textarea>
+            <span class="help">每行或逗号分隔一个 IP:端口（从内网机器上访问的地址），与上面的本地 IP:端口一起组成后端池。拨号失败会自动换下一个后端，内网机器每 10 秒做一次 TCP 健康检查并跳过不健康后端。UDP 规则不支持。</span>
+          </div>
+          <div class="field" data-proto-show="http tls tcp tcp+udp">
+            <label for="f-lb">负载均衡策略</label>
+            <select id="f-lb" name="lb_strategy">
+              <option value="round_robin" {{if $e}}{{if or (eq $e.LBStrategy "") (eq $e.LBStrategy "round_robin")}}selected{{end}}{{end}}>轮询</option>
+              <option value="random" {{if $e}}{{if eq $e.LBStrategy "random"}}selected{{end}}{{end}}>随机</option>
+              <option value="failover" {{if $e}}{{if eq $e.LBStrategy "failover"}}selected{{end}}{{end}}>主备（优先使用第一个健康后端）</option>
+            </select>
+            <span class="help">仅在填写了额外后端时生效</span>
+          </div>
           <div class="field span-all">
             <label for="f-gallow">访问白名单（IP / CIDR，可选）</label>
             <input id="f-gallow" name="guard_allow" value="{{if $e}}{{$e.GuardAllow}}{{end}}" placeholder="例如：203.0.113.0/24, 198.51.100.7">

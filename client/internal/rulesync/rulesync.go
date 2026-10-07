@@ -33,15 +33,32 @@ type Reconciler struct {
 	rules         map[uint32]protocol.Rule
 	preparedNetns map[int]bool // 容器 PID -> 其 netns 是否已配置 sysctls+路由
 	hostSetupDone bool
+
+	// backends 负责多后端规则的负载均衡、故障转移与健康检查（见 backends.go）。
+	backends *backendPool
 }
 
 func New(logger *slog.Logger, stateDir string) *Reconciler {
-	return &Reconciler{
+	r := &Reconciler{
 		Logger:        logger,
 		StateDir:      stateDir,
 		rules:         make(map[uint32]protocol.Rule),
 		preparedNetns: make(map[int]bool),
+		backends:      newBackendPool(),
 	}
+	go r.backends.healthLoop(context.Background(), r.allRules)
+	return r
+}
+
+// allRules 返回当前快照中全部规则的副本（供健康检查使用）。
+func (r *Reconciler) allRules() []protocol.Rule {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]protocol.Rule, 0, len(r.rules))
+	for _, rule := range r.rules {
+		out = append(out, rule)
+	}
+	return out
 }
 
 // Apply 安装一份新的完整快照；不再存在的规则会被丢弃（后续流按其 ID
@@ -80,16 +97,38 @@ func (r *Reconciler) ServeStream(ctx context.Context, meta protocol.StreamMetada
 
 	switch meta.Transport {
 	case protocol.TransportTCP:
+		var conn net.Conn = stream
+		var ac *ackConn
 		if meta.HasFlag(protocol.FlagDialAck) {
-			// Server（HTTP 模式）要求拨号确认：serveTCP 只有在成功拨通本地服务后
+			// Server（HTTP/TLS 模式）要求拨号确认：serveTCP 只有在成功拨通本地服务后
 			// 才会开始读写 stream，ackConn 在第一次读/写时先回写 DialAckOK；
-			// 若 serveTCP 在未触碰 stream 的情况下返回（拨号失败），则回写
-			// DialAckFailed，让 Server 能展示“服务不可用”页面。
-			ac := &ackConn{Conn: stream}
-			r.serveTCP(ctx, rule, meta, ac)
+			// 若所有后端都未触碰 stream 即返回（拨号失败），则回写 DialAckFailed，
+			// 让 Server 能展示“服务不可用”页面。
+			ac = &ackConn{Conn: stream}
+			conn = ac
+		}
+		// 多后端：按策略依次尝试，serveTCP 未触碰 stream 即返回视为该后端拨号失败。
+		targets := r.backends.order(rule)
+		for _, addr := range targets {
+			tr, ok := withTarget(rule, addr)
+			if !ok {
+				continue
+			}
+			tc := &touchConn{Conn: conn}
+			r.serveTCP(ctx, tr, meta, tc)
+			if tc.touched.Load() {
+				if len(targets) > 1 {
+					r.backends.markOK(addr)
+				}
+				break
+			}
+			if len(targets) > 1 {
+				r.Logger.Warn("backend dial failed, trying next backend", "rule", rule.Name, "backend", addr)
+				r.backends.markFailed(addr)
+			}
+		}
+		if ac != nil {
 			ac.finish()
-		} else {
-			r.serveTCP(ctx, rule, meta, stream)
 		}
 	case protocol.TransportUDP:
 		r.serveUDP(ctx, rule, meta, stream)

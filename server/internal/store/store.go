@@ -111,7 +111,9 @@ CREATE TABLE IF NOT EXISTS rules (
 	guard_deny TEXT NOT NULL DEFAULT '',
 	max_conns_per_ip INTEGER NOT NULL DEFAULT 0,
 	conn_rate_per_min INTEGER NOT NULL DEFAULT 0,
-	bandwidth_kbps INTEGER NOT NULL DEFAULT 0
+	bandwidth_kbps INTEGER NOT NULL DEFAULT 0,
+	backends TEXT NOT NULL DEFAULT '',
+	lb_strategy TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS reserved_ports (
@@ -194,16 +196,18 @@ CREATE TABLE rules_new (
 	guard_deny TEXT NOT NULL DEFAULT '',
 	max_conns_per_ip INTEGER NOT NULL DEFAULT 0,
 	conn_rate_per_min INTEGER NOT NULL DEFAULT 0,
-	bandwidth_kbps INTEGER NOT NULL DEFAULT 0
+	bandwidth_kbps INTEGER NOT NULL DEFAULT 0,
+	backends TEXT NOT NULL DEFAULT '',
+	lb_strategy TEXT NOT NULL DEFAULT ''
 );
 INSERT INTO rules_new (id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at,
 	domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https,
 	strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page,
-	guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps)
+	guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps, backends, lb_strategy)
 	SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at,
 	domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https,
 	strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page,
-	guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps FROM rules;
+	guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps, backends, lb_strategy FROM rules;
 DROP TABLE rules;
 ALTER TABLE rules_new RENAME TO rules;
 `
@@ -237,7 +241,7 @@ func (s *Store) ensureRuleColumns() error {
 	}
 	for _, col := range []string{"domains", "path_prefix", "offline_page", "ip_sources", "trusted_proxies", "tls_mode", "tls_cert", "tls_key", "redirect_https",
 		"strip_prefix", "host_rewrite", "req_headers", "resp_headers", "basic_auth", "ip_allow", "not_found_page",
-		"guard_allow", "guard_deny"} {
+		"guard_allow", "guard_deny", "backends", "lb_strategy"} {
 		if have[col] {
 			continue
 		}
@@ -702,6 +706,12 @@ type Rule struct {
 	ConnRatePerMin int
 	// BandwidthKBps 是该规则所有连接共享的带宽上限（KB/s），0 = 不限制。
 	BandwidthKBps int
+
+	// 多后端负载均衡（tcp/http/tls 规则）。
+	// Backends 是每行或逗号分隔的额外后端 "ip:port"（主后端仍为 LocalIP:LocalPort）。
+	Backends string
+	// LBStrategy：""/"round_robin" = 轮询，"random" = 随机，"failover" = 主备。
+	LBStrategy string
 }
 
 // CreateRule 为某个 Client 添加一条新规则。默认以禁用状态创建
@@ -712,12 +722,12 @@ func (s *Store) CreateRule(ctx context.Context, r Rule) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO rules (client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https,
 		 strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page,
-		 guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps, backends, lb_strategy)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ClientID, r.Name, r.Protocol, r.LocalIP, r.LocalPort, r.RemotePort, boolToInt(r.PreserveSourceIP), boolToInt(r.Enabled), time.Now().Unix(),
 		r.Domains, r.PathPrefix, r.OfflinePage, r.IPSources, r.TrustedProxies, r.TLSMode, r.TLSCert, r.TLSKey, r.RedirectHTTPS,
 		r.StripPrefix, r.HostRewrite, r.ReqHeaders, r.RespHeaders, r.BasicAuth, r.IPAllow, r.NotFoundPage,
-		r.GuardAllow, r.GuardDeny, r.MaxConnsPerIP, r.ConnRatePerMin, r.BandwidthKBps)
+		r.GuardAllow, r.GuardDeny, r.MaxConnsPerIP, r.ConnRatePerMin, r.BandwidthKBps, r.Backends, r.LBStrategy)
 	if err != nil {
 		return 0, fmt.Errorf("store: create rule: %w", err)
 	}
@@ -732,13 +742,13 @@ func (s *Store) UpdateRule(ctx context.Context, r Rule) error {
 		 domains = ?, path_prefix = ?, offline_page = ?, ip_sources = ?, trusted_proxies = ?,
 		 tls_mode = ?, tls_cert = ?, tls_key = ?, redirect_https = ?,
 		 strip_prefix = ?, host_rewrite = ?, req_headers = ?, resp_headers = ?, basic_auth = ?, ip_allow = ?, not_found_page = ?,
-		 guard_allow = ?, guard_deny = ?, max_conns_per_ip = ?, conn_rate_per_min = ?, bandwidth_kbps = ?
+		 guard_allow = ?, guard_deny = ?, max_conns_per_ip = ?, conn_rate_per_min = ?, bandwidth_kbps = ?, backends = ?, lb_strategy = ?
 		 WHERE id = ?`,
 		r.Name, r.Protocol, r.LocalIP, r.LocalPort, r.RemotePort, boolToInt(r.PreserveSourceIP), boolToInt(r.Enabled),
 		r.Domains, r.PathPrefix, r.OfflinePage, r.IPSources, r.TrustedProxies,
 		r.TLSMode, r.TLSCert, r.TLSKey, r.RedirectHTTPS,
 		r.StripPrefix, r.HostRewrite, r.ReqHeaders, r.RespHeaders, r.BasicAuth, r.IPAllow, r.NotFoundPage,
-		r.GuardAllow, r.GuardDeny, r.MaxConnsPerIP, r.ConnRatePerMin, r.BandwidthKBps, r.ID)
+		r.GuardAllow, r.GuardDeny, r.MaxConnsPerIP, r.ConnRatePerMin, r.BandwidthKBps, r.Backends, r.LBStrategy, r.ID)
 	if err != nil {
 		return fmt.Errorf("store: update rule: %w", err)
 	}
@@ -767,7 +777,7 @@ func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 // GetRule 按 ID 返回单条规则。
 func (s *Store) GetRule(ctx context.Context, id int64) (Rule, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps FROM rules WHERE id = ?`, id)
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps, backends, lb_strategy FROM rules WHERE id = ?`, id)
 	return scanRule(row)
 }
 
@@ -775,7 +785,7 @@ func (s *Store) GetRule(ctx context.Context, id int64) (Rule, error) {
 // 面板中按 Client 划分的规则管理页面使用。
 func (s *Store) ListRulesForClient(ctx context.Context, clientID string) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps, backends, lb_strategy
 		 FROM rules WHERE client_id = ? ORDER BY created_at`, clientID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list rules for client: %w", err)
@@ -789,7 +799,7 @@ func (s *Store) ListRulesForClient(ctx context.Context, clientID string) ([]Rule
 // listener.Manager 应为其打开公网监听器的集合。
 func (s *Store) ListEnabledRulesForClient(ctx context.Context, clientID string) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps, backends, lb_strategy
 		 FROM rules WHERE client_id = ? AND enabled = 1 ORDER BY created_at`, clientID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list enabled rules for client: %w", err)
@@ -804,7 +814,7 @@ func (s *Store) ListEnabledRulesForClient(ctx context.Context, clientID string) 
 // 不仅仅由在线 Client 的握手驱动，参见 docs/03-product-design.md。
 func (s *Store) ListAllEnabledRules(ctx context.Context) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps, backends, lb_strategy
 		 FROM rules WHERE enabled = 1 ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list all enabled rules: %w", err)
@@ -837,7 +847,7 @@ func (s *Store) RemotePortInUse(ctx context.Context, remotePort uint16, excludeR
 // 无冲突时返回 (nil, nil)；有冲突时返回与之冲突的现有规则。
 func (s *Store) RuleConflict(ctx context.Context, c Rule) (*Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps, backends, lb_strategy
 		 FROM rules WHERE remote_port = ? AND id != ?`, c.RemotePort, c.ID)
 	if err != nil {
 		return nil, fmt.Errorf("store: check rule conflict: %w", err)
@@ -947,7 +957,7 @@ func scanRule(row *sql.Row) (Rule, error) {
 	var r Rule
 	var preserve, enabled int
 	var createdAt int64
-	err := row.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt, &r.Domains, &r.PathPrefix, &r.OfflinePage, &r.IPSources, &r.TrustedProxies, &r.TLSMode, &r.TLSCert, &r.TLSKey, &r.RedirectHTTPS, &r.StripPrefix, &r.HostRewrite, &r.ReqHeaders, &r.RespHeaders, &r.BasicAuth, &r.IPAllow, &r.NotFoundPage, &r.GuardAllow, &r.GuardDeny, &r.MaxConnsPerIP, &r.ConnRatePerMin, &r.BandwidthKBps)
+	err := row.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt, &r.Domains, &r.PathPrefix, &r.OfflinePage, &r.IPSources, &r.TrustedProxies, &r.TLSMode, &r.TLSCert, &r.TLSKey, &r.RedirectHTTPS, &r.StripPrefix, &r.HostRewrite, &r.ReqHeaders, &r.RespHeaders, &r.BasicAuth, &r.IPAllow, &r.NotFoundPage, &r.GuardAllow, &r.GuardDeny, &r.MaxConnsPerIP, &r.ConnRatePerMin, &r.BandwidthKBps, &r.Backends, &r.LBStrategy)
 	if err != nil {
 		return Rule{}, err
 	}
@@ -963,7 +973,7 @@ func scanRules(rows *sql.Rows) ([]Rule, error) {
 		var r Rule
 		var preserve, enabled int
 		var createdAt int64
-		if err := rows.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt, &r.Domains, &r.PathPrefix, &r.OfflinePage, &r.IPSources, &r.TrustedProxies, &r.TLSMode, &r.TLSCert, &r.TLSKey, &r.RedirectHTTPS, &r.StripPrefix, &r.HostRewrite, &r.ReqHeaders, &r.RespHeaders, &r.BasicAuth, &r.IPAllow, &r.NotFoundPage, &r.GuardAllow, &r.GuardDeny, &r.MaxConnsPerIP, &r.ConnRatePerMin, &r.BandwidthKBps); err != nil {
+		if err := rows.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt, &r.Domains, &r.PathPrefix, &r.OfflinePage, &r.IPSources, &r.TrustedProxies, &r.TLSMode, &r.TLSCert, &r.TLSKey, &r.RedirectHTTPS, &r.StripPrefix, &r.HostRewrite, &r.ReqHeaders, &r.RespHeaders, &r.BasicAuth, &r.IPAllow, &r.NotFoundPage, &r.GuardAllow, &r.GuardDeny, &r.MaxConnsPerIP, &r.ConnRatePerMin, &r.BandwidthKBps, &r.Backends, &r.LBStrategy); err != nil {
 			return nil, fmt.Errorf("store: scan rule: %w", err)
 		}
 		r.PreserveSourceIP = preserve != 0
