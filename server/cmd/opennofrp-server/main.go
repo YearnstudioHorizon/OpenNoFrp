@@ -257,7 +257,16 @@ func (s *server) reconcileListeners(ctx context.Context) {
 	}
 	desired := make([]listener.RuleView, 0, len(rules))
 	for _, r := range rules {
-		desired = append(desired, listener.RuleView{ID: uint32(r.ID), ClientID: r.ClientID, Protocol: r.Protocol, Port: r.RemotePort})
+		v := listener.RuleView{ID: uint32(r.ID), ClientID: r.ClientID, Protocol: r.Protocol, Port: r.RemotePort}
+		if r.Protocol == "http" {
+			v.Name = r.Name
+			v.Domains = store.SplitDomains(r.Domains)
+			v.PathPrefix = store.NormalizePathPrefix(r.PathPrefix)
+			v.OfflinePage = r.OfflinePage
+			v.IPSources = listener.ParseIPSources(r.IPSources)
+			v.TrustedProxies, _ = listener.ParseTrustedProxies(r.TrustedProxies)
+		}
+		desired = append(desired, v)
 	}
 	s.listener.Reconcile(desired)
 }

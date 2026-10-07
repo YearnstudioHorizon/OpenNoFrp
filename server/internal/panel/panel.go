@@ -25,6 +25,7 @@ import (
 
 	"opennofrp/pkg/updater"
 	"opennofrp/pkg/version"
+	"opennofrp/server/internal/listener"
 	"opennofrp/server/internal/store"
 )
 
@@ -98,6 +99,7 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("POST /clients/{id}/rules", auth(p.handleCreateRule))
 	mux.HandleFunc("POST /clients/{id}/rename", auth(p.handleRenameClient))
 	mux.HandleFunc("POST /clients/{id}/delete", auth(p.handleDeleteClient))
+	mux.HandleFunc("POST /rules/{id}/edit", auth(p.handleEditRule))
 	mux.HandleFunc("POST /rules/{id}/toggle", auth(p.handleToggleRule))
 	mux.HandleFunc("POST /rules/{id}/delete", auth(p.handleDeleteRule))
 	mux.HandleFunc("POST /reserved/add", auth(p.handleAddReserved))
@@ -225,15 +227,35 @@ func friendlyMsg(s string) string {
 	case "invalid credentials":
 		return "用户名或密码错误"
 	case "bad protocol":
-		return "协议无效，仅支持 TCP、UDP 或 TCP+UDP 双栈"
+		return "协议无效，仅支持 HTTP、TCP、UDP 或 TCP+UDP 双栈"
 	case "bad port":
 		return "端口无效，请填写 1–65535 之间的数字"
+	case "bad local ip":
+		return "本地 IP 无效，请填写合法的 IPv4/IPv6 地址"
+	case "bad path prefix":
+		return "路径前缀无效，须以 / 开头且只含合法 URL 字符"
+	case "offline page too large":
+		return "自定义不可用页面过大（上限 64 KB）"
+	case "rule saved":
+		return "规则已保存"
 	case "password too short":
 		return "新密码长度至少 6 位"
 	case "invalid current password":
 		return "当前旧密码错误，请重新输入"
 	case "password changed":
 		return "密码修改成功，所有已有登录会话已重新刷新"
+	}
+	if strings.HasPrefix(s, "bad ip source ") {
+		return fmt.Sprintf("真实 IP 来源 %s 无效", strings.TrimPrefix(s, "bad ip source "))
+	}
+	if strings.HasPrefix(s, "bad trusted proxy ") {
+		return fmt.Sprintf("可信代理 %s 无效，请填写 IP 或 CIDR（如 173.245.48.0/20）", strings.TrimPrefix(s, "bad trusted proxy "))
+	}
+	if strings.HasPrefix(s, "bad domain ") {
+		return fmt.Sprintf("域名 %s 无效，请填写如 example.com 或 *.example.com 的域名", strings.TrimPrefix(s, "bad domain "))
+	}
+	if strings.HasPrefix(s, "http route conflicts with rule ") {
+		return fmt.Sprintf("该端口上已有规则 #%s 使用了相同的域名 + 路径前缀", strings.TrimPrefix(s, "http route conflicts with rule "))
 	}
 	if strings.HasPrefix(s, "remote_port ") {
 		if i := strings.Index(s, " is reserved ("); i > 0 && strings.HasSuffix(s, ")") {
@@ -331,58 +353,167 @@ func (p *Panel) handleClientPage(w http.ResponseWriter, r *http.Request) {
 		lastSeen = c.LastSeenAt.Format("2006-01-02 15:04")
 	}
 	online := !c.LastSeenAt.IsZero() && time.Since(c.LastSeenAt) < 2*time.Minute
+
+	// ?edit=<ruleID> 时在页面中预填编辑表单。
+	var editRule *store.Rule
+	if eid, err := strconv.ParseInt(r.URL.Query().Get("edit"), 10, 64); err == nil && eid > 0 {
+		if er, err := p.Store.GetRule(r.Context(), eid); err == nil && er.ClientID == c.ID {
+			editRule = &er
+		}
+	}
+
 	p.tmpl.ExecuteTemplate(w, "client.html", map[string]any{
 		"Client": struct {
 			ID, Name, LastSeen string
 		}{ID: c.ID, Name: c.Name, LastSeen: lastSeen},
-		"Online": online,
-		"Rules":  rules,
-		"Error":  friendlyMsg(r.URL.Query().Get("err")),
-		"Notice": friendlyMsg(r.URL.Query().Get("ok")),
+		"Online":   online,
+		"Rules":    rules,
+		"EditRule": editRule,
+		"Error":    friendlyMsg(r.URL.Query().Get("err")),
+		"Notice":   friendlyMsg(r.URL.Query().Get("ok")),
 	})
+}
+
+var (
+	validDomainRegex = regexp.MustCompile(`^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+	validPathRegex   = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$`)
+)
+
+// maxOfflinePageBytes 限制自定义“服务不可用”页面的大小。
+const maxOfflinePageBytes = 64 * 1024
+
+// parseRuleForm 从表单解析并校验一条规则（创建与编辑共用）。excludeID 为正在
+// 编辑的规则 ID（创建时为 0）。返回的 errKey 非空时表示校验失败，可直接放入
+// ?err= 参数，由 friendlyMsg 翻译。
+func (p *Panel) parseRuleForm(r *http.Request, clientID string, excludeID int64) (store.Rule, string) {
+	protocol := r.FormValue("protocol")
+	if protocol != "tcp" && protocol != "udp" && protocol != "tcp+udp" && protocol != "http" {
+		return store.Rule{}, "bad protocol"
+	}
+	localPort, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("local_port")))
+	remotePort, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("remote_port")))
+	if localPort <= 0 || localPort > 65535 || remotePort <= 0 || remotePort > 65535 {
+		return store.Rule{}, "bad port"
+	}
+	reserved, _ := p.Store.ReservedPorts(r.Context())
+	if reason, isReserved := reserved[uint16(remotePort)]; isReserved {
+		return store.Rule{}, fmt.Sprintf("remote_port %d is reserved (%s)", remotePort, reason)
+	}
+	localIP := strings.TrimSpace(r.FormValue("local_ip"))
+	if localIP == "" {
+		localIP = "127.0.0.1"
+	}
+	if net.ParseIP(localIP) == nil {
+		return store.Rule{}, "bad local ip"
+	}
+	rule := store.Rule{
+		ID: excludeID, ClientID: clientID, Name: strings.TrimSpace(r.FormValue("name")), Protocol: protocol,
+		LocalIP: localIP, LocalPort: uint16(localPort), RemotePort: uint16(remotePort),
+		PreserveSourceIP: r.FormValue("preserve_source_ip") == "1",
+		Enabled:          r.FormValue("enabled") == "1",
+	}
+	if protocol == "http" {
+		domains := store.SplitDomains(r.FormValue("domains"))
+		for _, d := range domains {
+			if len(d) > 253 || !validDomainRegex.MatchString(d) {
+				return store.Rule{}, "bad domain " + d
+			}
+		}
+		pathPrefix := store.NormalizePathPrefix(r.FormValue("path_prefix"))
+		if !validPathRegex.MatchString(pathPrefix) {
+			return store.Rule{}, "bad path prefix"
+		}
+		offlinePage := r.FormValue("offline_page")
+		if len(offlinePage) > maxOfflinePageBytes {
+			return store.Rule{}, "offline page too large"
+		}
+		rule.Domains = strings.Join(domains, ",")
+		if pathPrefix != "/" {
+			rule.PathPrefix = pathPrefix
+		}
+		rule.OfflinePage = offlinePage
+
+		// 真实 IP 来源优先级：表单中按顺序提交多个 ip_sources 值（或单个逗号分隔值）。
+		rawSources := strings.Join(r.Form["ip_sources"], ",")
+		for _, s := range strings.FieldsFunc(rawSources, func(c rune) bool { return c == ',' || c == ' ' }) {
+			known := false
+			for _, k := range listener.KnownIPSources {
+				if strings.EqualFold(s, k) {
+					known = true
+					break
+				}
+			}
+			if !known {
+				return store.Rule{}, "bad ip source " + s
+			}
+		}
+		rule.IPSources = strings.Join(listener.ParseIPSources(rawSources), ",")
+
+		trusted := strings.TrimSpace(r.FormValue("trusted_proxies"))
+		if _, bad := listener.ParseTrustedProxies(trusted); len(bad) > 0 {
+			return store.Rule{}, "bad trusted proxy " + bad[0]
+		}
+		rule.TrustedProxies = strings.Join(strings.FieldsFunc(trusted, func(c rune) bool {
+			return c == ',' || c == ' ' || c == ';' || c == '\n' || c == '\r' || c == '\t'
+		}), ",")
+	}
+	conflict, err := p.Store.RuleConflict(r.Context(), rule)
+	if err != nil {
+		return store.Rule{}, err.Error()
+	}
+	if conflict != nil {
+		if protocol == "http" && conflict.Protocol == "http" {
+			return store.Rule{}, fmt.Sprintf("http route conflicts with rule %d", conflict.ID)
+		}
+		return store.Rule{}, fmt.Sprintf("remote_port %d already used", remotePort)
+	}
+	return rule, ""
 }
 
 func (p *Panel) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	clientID := r.PathValue("id")
-
-	protocol := r.FormValue("protocol")
-	if protocol != "tcp" && protocol != "udp" && protocol != "tcp+udp" {
-		p.redirectErr(w, r, fmt.Sprintf("/clients/%s?err=bad+protocol", clientID))
+	if _, err := p.Store.GetClient(r.Context(), clientID); err != nil {
+		http.NotFound(w, r)
 		return
 	}
-	localPort, _ := strconv.Atoi(r.FormValue("local_port"))
-	remotePort, _ := strconv.Atoi(r.FormValue("remote_port"))
-	if localPort <= 0 || localPort > 65535 || remotePort <= 0 || remotePort > 65535 {
-		p.redirectErr(w, r, fmt.Sprintf("/clients/%s?err=bad+port", clientID))
+	rule, errKey := p.parseRuleForm(r, clientID, 0)
+	if errKey != "" {
+		p.redirectErr(w, r, "/clients/"+clientID+"?err="+url.QueryEscape(errKey))
 		return
 	}
-	reserved, _ := p.Store.ReservedPorts(r.Context())
-	if reason, reserved := reserved[uint16(remotePort)]; reserved {
-		p.redirectErr(w, r, "/clients/"+clientID+"?err="+url.QueryEscape(fmt.Sprintf("remote_port %d is reserved (%s)", remotePort, reason)))
-		return
-	}
-	used, err := p.Store.RemotePortInUse(r.Context(), uint16(remotePort), 0)
-	if err == nil && used {
-		p.redirectErr(w, r, "/clients/"+clientID+"?err="+url.QueryEscape(fmt.Sprintf("remote_port %d already used", remotePort)))
-		return
-	}
-	localIP := r.FormValue("local_ip")
-	if localIP == "" {
-		localIP = "127.0.0.1"
-	}
-	enabled := r.FormValue("enabled") == "1"
-	_, err = p.Store.CreateRule(r.Context(), store.Rule{
-		ClientID: clientID, Name: r.FormValue("name"), Protocol: protocol,
-		LocalIP: localIP, LocalPort: uint16(localPort), RemotePort: uint16(remotePort),
-		PreserveSourceIP: r.FormValue("preserve_source_ip") == "1", Enabled: enabled,
-	})
-	if err != nil {
+	if _, err := p.Store.CreateRule(r.Context(), rule); err != nil {
 		p.redirectErr(w, r, "/clients/"+clientID+"?err="+url.QueryEscape(err.Error()))
 		return
 	}
 	p.rulesChanged()
 	http.Redirect(w, r, "/clients/"+clientID, http.StatusSeeOther)
+}
+
+// handleEditRule 覆盖一条现有规则的全部可变字段（ClientID 不可变）。
+func (p *Panel) handleEditRule(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	id64, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	existing, err := p.Store.GetRule(r.Context(), id64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	rule, errKey := p.parseRuleForm(r, existing.ClientID, id64)
+	if errKey != "" {
+		p.redirectErr(w, r, fmt.Sprintf("/clients/%s?edit=%d&err=%s", existing.ClientID, id64, url.QueryEscape(errKey)))
+		return
+	}
+	if err := p.Store.UpdateRule(r.Context(), rule); err != nil {
+		p.redirectErr(w, r, "/clients/"+existing.ClientID+"?err="+url.QueryEscape(err.Error()))
+		return
+	}
+	p.rulesChanged()
+	http.Redirect(w, r, "/clients/"+existing.ClientID+"?ok=rule+saved", http.StatusSeeOther)
 }
 
 func (p *Panel) handleRenameClient(w http.ResponseWriter, r *http.Request) {

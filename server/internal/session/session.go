@@ -3,7 +3,9 @@
 package session
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -129,6 +131,49 @@ func (s *Session) OpenUDPStream(remoteAddr *net.UDPAddr, ruleID uint32) (net.Con
 	s.Touch()
 	return stream, nil
 }
+
+// OpenHTTPStream 为 HTTP 反向代理打开一个到 Client 的 TCP 流。与 OpenStreamFor 不同，
+// 它设置 FlagDialAck 并等待 Client 回写拨号确认字节：返回 nil 错误时，Client 已经
+// 成功拨通本地服务，调用方可直接在返回的连接上写入 HTTP 请求；若本地服务不可用，
+// 返回 ErrBackendUnavailable，调用方据此展示“服务不可用”页面。
+func (s *Session) OpenHTTPStream(clientIP net.IP, clientPort uint16, ruleID uint32, timeout time.Duration) (net.Conn, error) {
+	stream, err := s.Yamux.Open()
+	if err != nil {
+		return nil, fmt.Errorf("session: open yamux stream (http): %w", err)
+	}
+	if clientIP == nil {
+		clientIP = net.IPv4zero
+	}
+	meta := protocol.StreamMetadata{
+		Transport:  protocol.TransportTCP,
+		ClientAddr: clientIP,
+		ClientPort: clientPort,
+		RuleID:     ruleID,
+		Flags:      protocol.FlagDialAck,
+	}
+	if err := meta.WriteHeader(stream); err != nil {
+		stream.Close()
+		return nil, fmt.Errorf("session: write stream metadata: %w", err)
+	}
+	if timeout > 0 {
+		stream.SetReadDeadline(time.Now().Add(timeout))
+	}
+	var ack [1]byte
+	if _, err := io.ReadFull(stream, ack[:]); err != nil {
+		stream.Close()
+		return nil, fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
+	}
+	stream.SetReadDeadline(time.Time{})
+	if ack[0] != protocol.DialAckOK {
+		stream.Close()
+		return nil, ErrBackendUnavailable
+	}
+	s.Touch()
+	return stream, nil
+}
+
+// ErrBackendUnavailable 表示 Client 无法连接其本地服务（或未及时确认）。
+var ErrBackendUnavailable = errors.New("session: backend unavailable")
 
 func relay(publicConn net.Conn, stream net.Conn, logger *slog.Logger) {
 	defer publicConn.Close()

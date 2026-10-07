@@ -72,18 +72,63 @@ func (r *Reconciler) ServeStream(ctx context.Context, meta protocol.StreamMetada
 	rule, ok := r.Get(meta.RuleID)
 	if !ok {
 		r.Logger.Error("stream for unknown rule id, dropping", "rule_id", meta.RuleID)
+		if meta.HasFlag(protocol.FlagDialAck) {
+			_, _ = stream.Write([]byte{protocol.DialAckFailed})
+		}
 		return
 	}
 
 	switch meta.Transport {
 	case protocol.TransportTCP:
-		r.serveTCP(ctx, rule, meta, stream)
+		if meta.HasFlag(protocol.FlagDialAck) {
+			// Server（HTTP 模式）要求拨号确认：serveTCP 只有在成功拨通本地服务后
+			// 才会开始读写 stream，ackConn 在第一次读/写时先回写 DialAckOK；
+			// 若 serveTCP 在未触碰 stream 的情况下返回（拨号失败），则回写
+			// DialAckFailed，让 Server 能展示“服务不可用”页面。
+			ac := &ackConn{Conn: stream}
+			r.serveTCP(ctx, rule, meta, ac)
+			ac.finish()
+		} else {
+			r.serveTCP(ctx, rule, meta, stream)
+		}
 	case protocol.TransportUDP:
 		r.serveUDP(ctx, rule, meta, stream)
 	default:
 		r.Logger.Error("unknown transport on stream metadata", "transport", meta.Transport)
 	}
 }
+
+// ackConn 包装一个要求拨号确认的流：首次 Read/Write 之前先写出 DialAckOK；
+// finish 在从未读写过（即拨号失败）时写出 DialAckFailed。
+type ackConn struct {
+	net.Conn
+	once sync.Once
+	err  error
+}
+
+func (a *ackConn) ack(status byte) {
+	a.once.Do(func() {
+		_, a.err = a.Conn.Write([]byte{status})
+	})
+}
+
+func (a *ackConn) Read(p []byte) (int, error) {
+	a.ack(protocol.DialAckOK)
+	if a.err != nil {
+		return 0, a.err
+	}
+	return a.Conn.Read(p)
+}
+
+func (a *ackConn) Write(p []byte) (int, error) {
+	a.ack(protocol.DialAckOK)
+	if a.err != nil {
+		return 0, a.err
+	}
+	return a.Conn.Write(p)
+}
+
+func (a *ackConn) finish() { a.ack(protocol.DialAckFailed) }
 
 func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta protocol.StreamMetadata, stream net.Conn) {
 	target := net.JoinHostPort(rule.LocalIP, fmt.Sprint(rule.LocalPort))

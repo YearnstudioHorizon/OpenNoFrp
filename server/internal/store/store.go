@@ -84,14 +84,18 @@ CREATE TABLE IF NOT EXISTS rules (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
-	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp','tcp+udp')),
+	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp','tcp+udp','http')),
 	local_ip TEXT NOT NULL DEFAULT '127.0.0.1',
 	local_port INTEGER NOT NULL,
 	remote_port INTEGER NOT NULL,
 	preserve_source_ip INTEGER NOT NULL DEFAULT 1,
 	enabled INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL,
-	UNIQUE(remote_port)
+	domains TEXT NOT NULL DEFAULT '',
+	path_prefix TEXT NOT NULL DEFAULT '',
+	offline_page TEXT NOT NULL DEFAULT '',
+	ip_sources TEXT NOT NULL DEFAULT '',
+	trusted_proxies TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS reserved_ports (
@@ -106,19 +110,27 @@ CREATE TABLE IF NOT EXISTS reserved_ports (
 	if err := s.migrateRulesDualStack(); err != nil {
 		return fmt.Errorf("store: migrate rules dual-stack: %w", err)
 	}
+	if err := s.ensureRuleColumns(); err != nil {
+		return fmt.Errorf("store: migrate rules columns: %w", err)
+	}
 	return nil
 }
 
-// migrateRulesDualStack 重建在双栈（"tcp+udp"）规则出现之前创建的数据库中
-// 的 rules 表。SQLite 无法原地修改 CHECK 约束，因此会将该表复制到一个
-// 约束已放宽的新表中。该操作是幂等的：一旦约束中已包含 'tcp+udp'，便不做
-// 任何事。
+// migrateRulesDualStack 重建在 HTTP 规则出现之前创建的数据库中的 rules 表
+// （包括更早的、尚不支持 "tcp+udp" 的版本）。SQLite 无法原地修改 CHECK
+// 约束或删除 UNIQUE 约束，因此会将该表复制到一个新表中：
+//   - protocol 允许 'http'；
+//   - 去掉 UNIQUE(remote_port)：多个 HTTP 规则可以按域名/路径共享同一端口，
+//     端口冲突改由应用层（RuleConflict）检查；
+//   - 新增 domains / path_prefix / offline_page 列。
+//
+// 该操作是幂等的：一旦约束中已包含 'http'，便不做任何事。
 func (s *Store) migrateRulesDualStack() error {
 	var ddl string
 	if err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rules'`).Scan(&ddl); err != nil {
 		return err
 	}
-	if strings.Contains(ddl, "tcp+udp") {
+	if strings.Contains(ddl, "'http'") {
 		return nil
 	}
 	tx, err := s.db.Begin()
@@ -131,14 +143,18 @@ CREATE TABLE rules_new (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
-	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp','tcp+udp')),
+	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp','tcp+udp','http')),
 	local_ip TEXT NOT NULL DEFAULT '127.0.0.1',
 	local_port INTEGER NOT NULL,
 	remote_port INTEGER NOT NULL,
 	preserve_source_ip INTEGER NOT NULL DEFAULT 1,
 	enabled INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL,
-	UNIQUE(remote_port)
+	domains TEXT NOT NULL DEFAULT '',
+	path_prefix TEXT NOT NULL DEFAULT '',
+	offline_page TEXT NOT NULL DEFAULT '',
+	ip_sources TEXT NOT NULL DEFAULT '',
+	trusted_proxies TEXT NOT NULL DEFAULT ''
 );
 INSERT INTO rules_new (id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at)
 	SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at FROM rules;
@@ -149,6 +165,39 @@ ALTER TABLE rules_new RENAME TO rules;
 		return err
 	}
 	return tx.Commit()
+}
+
+// ensureRuleColumns 为已经升级到 HTTP 版本、但缺少后续新增列的 rules 表补齐
+// 列（ALTER TABLE ADD COLUMN 可在 SQLite 中原地执行）。幂等。
+func (s *Store) ensureRuleColumns() error {
+	rows, err := s.db.Query(`PRAGMA table_info(rules)`)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, col := range []string{"domains", "path_prefix", "offline_page", "ip_sources", "trusted_proxies"} {
+		if have[col] {
+			continue
+		}
+		if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE rules ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // --- 管理员账户 -------------------------------------------------------
@@ -473,13 +522,30 @@ type Rule struct {
 	ID               int64
 	ClientID         string
 	Name             string
-	Protocol         string // "tcp" 或 "udp"
+	Protocol         string // "tcp"、"udp"、"tcp+udp" 或 "http"
 	LocalIP          string
 	LocalPort        uint16
 	RemotePort       uint16
 	PreserveSourceIP bool
 	Enabled          bool
 	CreatedAt        time.Time
+
+	// 以下字段仅对 protocol = "http" 有意义。
+	// Domains 是逗号分隔的域名列表（支持 "*.example.com" 通配），为空表示
+	// 匹配该端口上的任意 Host（兜底规则）。
+	Domains string
+	// PathPrefix 是 URL 路径前缀（例如 "/api"），为空等同于 "/"。
+	PathPrefix string
+	// OfflinePage 是后端不可用（Client 离线或本地服务未启动）时返回给访问者
+	// 的自定义 HTML；为空时使用内置默认页面。
+	OfflinePage string
+	// IPSources 是逗号分隔、按优先级排列的真实客户端 IP 来源列表，取值：
+	// remote_addr、x-forwarded-for、x-real-ip、cf-connecting-ip、
+	// true-client-ip、x-client-ip、forwarded。为空等同于 "remote_addr"。
+	IPSources string
+	// TrustedProxies 是逗号分隔的 CIDR/IP 列表：只有当 TCP 对端地址属于其中之一时
+	// 才信任请求头中的 IP。为空表示信任任意对端（适用于前面一定有 CDN 的场景）。
+	TrustedProxies string
 }
 
 // CreateRule 为某个 Client 添加一条新规则。默认以禁用状态创建
@@ -488,9 +554,10 @@ type Rule struct {
 // 内网服务尚未启动时）而不让其生效。
 func (s *Store) CreateRule(ctx context.Context, r Rule) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO rules (client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ClientID, r.Name, r.Protocol, r.LocalIP, r.LocalPort, r.RemotePort, boolToInt(r.PreserveSourceIP), boolToInt(r.Enabled), time.Now().Unix())
+		`INSERT INTO rules (client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ClientID, r.Name, r.Protocol, r.LocalIP, r.LocalPort, r.RemotePort, boolToInt(r.PreserveSourceIP), boolToInt(r.Enabled), time.Now().Unix(),
+		r.Domains, r.PathPrefix, r.OfflinePage, r.IPSources, r.TrustedProxies)
 	if err != nil {
 		return 0, fmt.Errorf("store: create rule: %w", err)
 	}
@@ -501,9 +568,11 @@ func (s *Store) CreateRule(ctx context.Context, r Rule) (int64, error) {
 // 若要将规则移到另一个 Client，请删除后重新创建）。
 func (s *Store) UpdateRule(ctx context.Context, r Rule) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE rules SET name = ?, protocol = ?, local_ip = ?, local_port = ?, remote_port = ?, preserve_source_ip = ?, enabled = ?
+		`UPDATE rules SET name = ?, protocol = ?, local_ip = ?, local_port = ?, remote_port = ?, preserve_source_ip = ?, enabled = ?,
+		 domains = ?, path_prefix = ?, offline_page = ?, ip_sources = ?, trusted_proxies = ?
 		 WHERE id = ?`,
-		r.Name, r.Protocol, r.LocalIP, r.LocalPort, r.RemotePort, boolToInt(r.PreserveSourceIP), boolToInt(r.Enabled), r.ID)
+		r.Name, r.Protocol, r.LocalIP, r.LocalPort, r.RemotePort, boolToInt(r.PreserveSourceIP), boolToInt(r.Enabled),
+		r.Domains, r.PathPrefix, r.OfflinePage, r.IPSources, r.TrustedProxies, r.ID)
 	if err != nil {
 		return fmt.Errorf("store: update rule: %w", err)
 	}
@@ -532,7 +601,7 @@ func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 // GetRule 按 ID 返回单条规则。
 func (s *Store) GetRule(ctx context.Context, id int64) (Rule, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at FROM rules WHERE id = ?`, id)
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies FROM rules WHERE id = ?`, id)
 	return scanRule(row)
 }
 
@@ -540,7 +609,7 @@ func (s *Store) GetRule(ctx context.Context, id int64) (Rule, error) {
 // 面板中按 Client 划分的规则管理页面使用。
 func (s *Store) ListRulesForClient(ctx context.Context, clientID string) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies
 		 FROM rules WHERE client_id = ? ORDER BY created_at`, clientID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list rules for client: %w", err)
@@ -554,7 +623,7 @@ func (s *Store) ListRulesForClient(ctx context.Context, clientID string) ([]Rule
 // listener.Manager 应为其打开公网监听器的集合。
 func (s *Store) ListEnabledRulesForClient(ctx context.Context, clientID string) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies
 		 FROM rules WHERE client_id = ? AND enabled = 1 ORDER BY created_at`, clientID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list enabled rules for client: %w", err)
@@ -569,7 +638,7 @@ func (s *Store) ListEnabledRulesForClient(ctx context.Context, clientID string) 
 // 不仅仅由在线 Client 的握手驱动，参见 docs/03-product-design.md。
 func (s *Store) ListAllEnabledRules(ctx context.Context) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies
 		 FROM rules WHERE enabled = 1 ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list all enabled rules: %w", err)
@@ -592,11 +661,99 @@ func (s *Store) RemotePortInUse(ctx context.Context, remotePort uint16, excludeR
 	return n > 0, nil
 }
 
+// RuleConflict 检查候选规则 c 与除 c.ID 之外的现有规则在公网端口上是否冲突。
+// 冲突规则：
+//   - 传输层重叠（tcp 与 tcp / tcp+udp / http；udp 与 udp / tcp+udp）的
+//     非 HTTP 规则不能共享端口；
+//   - HTTP 规则之间可以共享端口，但 (域名, 路径前缀) 组合不能重叠；
+//   - HTTP 规则不能与 tcp / tcp+udp 规则共享端口（同端口的纯 UDP 规则允许）。
+//
+// 无冲突时返回 (nil, nil)；有冲突时返回与之冲突的现有规则。
+func (s *Store) RuleConflict(ctx context.Context, c Rule) (*Rule, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies
+		 FROM rules WHERE remote_port = ? AND id != ?`, c.RemotePort, c.ID)
+	if err != nil {
+		return nil, fmt.Errorf("store: check rule conflict: %w", err)
+	}
+	defer rows.Close()
+	existing, err := scanRules(rows)
+	if err != nil {
+		return nil, err
+	}
+	for i := range existing {
+		e := existing[i]
+		if rulesConflict(c, e) {
+			return &e, nil
+		}
+	}
+	return nil, nil
+}
+
+func usesTCP(proto string) bool { return proto == "tcp" || proto == "tcp+udp" || proto == "http" }
+func usesUDP(proto string) bool { return proto == "udp" || proto == "tcp+udp" }
+
+func rulesConflict(a, b Rule) bool {
+	if a.Protocol == "http" && b.Protocol == "http" {
+		if NormalizePathPrefix(a.PathPrefix) != NormalizePathPrefix(b.PathPrefix) {
+			return false
+		}
+		da, db := SplitDomains(a.Domains), SplitDomains(b.Domains)
+		if len(da) == 0 || len(db) == 0 {
+			return len(da) == 0 && len(db) == 0
+		}
+		set := make(map[string]bool, len(da))
+		for _, d := range da {
+			set[d] = true
+		}
+		for _, d := range db {
+			if set[d] {
+				return true
+			}
+		}
+		return false
+	}
+	return (usesTCP(a.Protocol) && usesTCP(b.Protocol)) || (usesUDP(a.Protocol) && usesUDP(b.Protocol))
+}
+
+// SplitDomains 将逗号/空白分隔的域名列表规范化（小写、去空、去重、去末尾点）。
+func SplitDomains(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\r' || r == '\t' || r == ';'
+	})
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range fields {
+		d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(f)), ".")
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out
+}
+
+// NormalizePathPrefix 规范化路径前缀：保证以 "/" 开头，去掉末尾的 "/"（根路径除外）。
+func NormalizePathPrefix(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	for len(p) > 1 && strings.HasSuffix(p, "/") {
+		p = strings.TrimSuffix(p, "/")
+	}
+	return p
+}
+
 func scanRule(row *sql.Row) (Rule, error) {
 	var r Rule
 	var preserve, enabled int
 	var createdAt int64
-	err := row.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt)
+	err := row.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt, &r.Domains, &r.PathPrefix, &r.OfflinePage, &r.IPSources, &r.TrustedProxies)
 	if err != nil {
 		return Rule{}, err
 	}
@@ -612,7 +769,7 @@ func scanRules(rows *sql.Rows) ([]Rule, error) {
 		var r Rule
 		var preserve, enabled int
 		var createdAt int64
-		if err := rows.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.ClientID, &r.Name, &r.Protocol, &r.LocalIP, &r.LocalPort, &r.RemotePort, &preserve, &enabled, &createdAt, &r.Domains, &r.PathPrefix, &r.OfflinePage, &r.IPSources, &r.TrustedProxies); err != nil {
 			return nil, fmt.Errorf("store: scan rule: %w", err)
 		}
 		r.PreserveSourceIP = preserve != 0

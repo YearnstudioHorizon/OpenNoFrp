@@ -61,7 +61,7 @@ func (t TransportKind) String() string {
 //	bytes   19..21  : 原始客户端端口（uint16）
 //	bytes   21..25  : RuleID（uint32）——标识该连接属于 Client 当前生效的
 //	                  规则（来自最近一次 RulesSnapshot）中的哪一条
-//	byte    25      : flags（保留，目前必须为 0）
+//	byte    25      : flags（位标志；bit0 = FlagDialAck，其余保留为 0）
 //	bytes   26..28  : 尾部变长区段的长度（uint16），
 //	                  目前始终为 0，保留用于未来扩展
 //	                  （例如 SNI 提示），而不会破坏固定头部
@@ -70,7 +70,23 @@ type StreamMetadata struct {
 	ClientAddr net.IP
 	ClientPort uint16
 	RuleID     uint32
+	// Flags 是位标志（byte 25）。旧版 Client 会忽略该字节。
+	Flags uint8
 }
+
+// FlagDialAck 要求 Client 在拨号本地服务之后、转发任何负载之前，先在流上回写
+// 一个状态字节（DialAckOK / DialAckFailed）。Server 的 HTTP 模式用它判断后端
+// 是否可用，以便在后端离线时返回自定义的“服务不可用”页面。
+const FlagDialAck uint8 = 1 << 0
+
+// 拨号确认状态字节。
+const (
+	DialAckOK     byte = 0x00
+	DialAckFailed byte = 0x01
+)
+
+// HasFlag 报告元数据是否设置了给定标志位。
+func (m StreamMetadata) HasFlag(f uint8) bool { return m.Flags&f != 0 }
 
 const fixedHeaderLen = 28
 
@@ -95,7 +111,7 @@ func (m StreamMetadata) Encode() ([]byte, error) {
 
 	binary.BigEndian.PutUint16(buf[19:21], m.ClientPort)
 	binary.BigEndian.PutUint32(buf[21:25], m.RuleID)
-	buf[25] = 0                               // flags 保留
+	buf[25] = m.Flags                         // flags
 	binary.BigEndian.PutUint16(buf[26:28], 0) // 暂无尾部区段
 
 	return buf, nil
@@ -147,6 +163,7 @@ func ReadStreamMetadata(r io.Reader) (StreamMetadata, error) {
 
 	m.ClientPort = binary.BigEndian.Uint16(header[19:21])
 	m.RuleID = binary.BigEndian.Uint32(header[21:25])
+	m.Flags = header[25]
 
 	trailingLen := binary.BigEndian.Uint16(header[26:28])
 	if trailingLen > 0 {

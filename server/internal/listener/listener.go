@@ -21,8 +21,18 @@ import (
 type RuleView struct {
 	ID       uint32
 	ClientID string
-	Protocol string // "tcp"、"udp" 或 "tcp+udp"（双栈）
+	Protocol string // "tcp"、"udp"、"tcp+udp"（双栈）或 "http"
 	Port     uint16
+
+	// 以下字段仅用于 http 规则。
+	Name        string
+	Domains     []string // 已规范化；为空表示匹配任意 Host
+	PathPrefix  string   // 已规范化，以 "/" 开头
+	OfflinePage string
+	// IPSources 是按优先级排列的真实客户端 IP 来源（见 realip.go）。
+	IPSources []string
+	// TrustedProxies 非空时，仅当 TCP 对端属于其中之一才信任请求头中的 IP。
+	TrustedProxies []*net.IPNet
 }
 
 // expandRule 将一条双栈（"tcp+udp"）规则拆分为一个 TCP 视图和一个 UDP
@@ -49,9 +59,10 @@ type Manager struct {
 	Logger   *slog.Logger
 	Lookup   SessionLookup
 
-	mu  sync.Mutex
-	tcp map[uint16]*tcpListener
-	udp map[uint16]*udpListener
+	mu   sync.Mutex
+	tcp  map[uint16]*tcpListener
+	udp  map[uint16]*udpListener
+	http map[uint16]*httpListener
 }
 
 type tcpListener struct {
@@ -82,6 +93,7 @@ func NewManager(bindAddr string, logger *slog.Logger, lookup SessionLookup) *Man
 		Lookup:   lookup,
 		tcp:      make(map[uint16]*tcpListener),
 		udp:      make(map[uint16]*udpListener),
+		http:     make(map[uint16]*httpListener),
 	}
 }
 
@@ -115,6 +127,9 @@ func (m *Manager) openTCP(r ruleView) error {
 			return nil
 		}
 		return fmt.Errorf("listener: tcp port %d already open for rule %d", r.Port, existing.ruleID)
+	}
+	if _, ok := m.http[r.Port]; ok {
+		return fmt.Errorf("listener: tcp port %d already open as an http listener", r.Port)
 	}
 	addr := fmt.Sprintf("%s:%d", m.BindAddr, r.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -334,7 +349,12 @@ func (m *Manager) OpenPorts() map[string]uint32 {
 // 端口重新创建）。
 func (m *Manager) Reconcile(desired []RuleView) {
 	want := make(map[string]RuleView)
+	var httpRules []RuleView
 	for _, r := range desired {
+		if r.Protocol == "http" {
+			httpRules = append(httpRules, r)
+			continue
+		}
 		// 双栈规则会变成两个条目：tcp:port 和 udp:port
 		for _, v := range expandRule(r) {
 			want[fmt.Sprintf("%s:%d", v.Protocol, v.Port)] = v
@@ -350,6 +370,9 @@ func (m *Manager) Reconcile(desired []RuleView) {
 			m.ClosePort(protocol, uint16(port))
 		}
 	}
+	// 先关闭不再需要的 HTTP 端口并更新路由，再打开 TCP/UDP 端口，
+	// 使 http -> tcp 的协议切换能释放端口。
+	m.reconcileHTTP(httpRules)
 	for key, r := range want {
 		if existingID, ok := have[key]; !ok || existingID != r.ID {
 			if err := m.OpenRule(r); err != nil {

@@ -93,6 +93,11 @@ const (
 	// 监听。各个流的元数据中仍然携带 TransportTCP 或 TransportUDP，因此 Client
 	// 无需对此做特殊处理。
 	RuleProtocolBoth RuleProtocol = "tcp+udp"
+	// RuleProtocolHTTP 是 HTTP 反向代理规则：Server 在公网端口上解析 HTTP 请求，
+	// 按 Host/路径前缀路由到对应规则（多条 HTTP 规则可共享同一端口），支持
+	// WebSocket 升级与 SSE 流式响应。对 Client 而言，每个 HTTP 请求连接仍以
+	// TransportTCP 流的形式到达，按普通 TCP 规则拨号本地服务即可。
+	RuleProtocolHTTP RuleProtocol = "http"
 )
 
 // Rule 是由 Server 推送给 Client 的一条转发规则。它是由 Server 掌控的、关于

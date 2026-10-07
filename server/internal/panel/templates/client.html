@@ -48,28 +48,36 @@
 
   <section class="card">
     <h2>转发规则</h2>
-    <p class="desc">启用中的规则会在服务器上开放对应公网端口，并实时同步到这台内网机器。</p>
+    <p class="desc">启用中的规则会在服务器上开放对应公网端口，并实时同步到这台内网机器。多条 HTTP 规则可以按域名 / 路径共享同一个公网端口。</p>
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>ID</th><th>名称</th><th>协议</th><th>本地地址</th><th>公网端口</th><th>源 IP 保留</th><th>状态</th><th style="width:150px">操作</th></tr>
+          <tr><th>ID</th><th>名称</th><th>协议</th><th>本地地址</th><th>公网入口</th><th>源 IP 保留</th><th>状态</th><th style="width:200px">操作</th></tr>
         </thead>
         <tbody>
         {{range .Rules}}
           <tr class="{{if not .Enabled}}disabled{{end}}">
             <td>{{.ID}}</td>
             <td>{{.Name}}</td>
-            <td>{{if eq .Protocol "tcp+udp"}}<span class="badge badge-blue">TCP</span> <span class="badge badge-purple">UDP</span>{{else if eq .Protocol "udp"}}<span class="badge badge-purple">UDP</span>{{else}}<span class="badge badge-blue">TCP</span>{{end}}</td>
+            <td>{{if eq .Protocol "http"}}<span class="badge badge-green">HTTP</span>{{else if eq .Protocol "tcp+udp"}}<span class="badge badge-blue">TCP</span> <span class="badge badge-purple">UDP</span>{{else if eq .Protocol "udp"}}<span class="badge badge-purple">UDP</span>{{else}}<span class="badge badge-blue">TCP</span>{{end}}</td>
             <td class="mono" style="font-size:13px">{{.LocalIP}}:{{.LocalPort}}</td>
-            <td><span class="port">:{{.RemotePort}}</span></td>
-            <td>{{if .PreserveSourceIP}}<span class="badge badge-amber">保留</span>{{else}}<span style="color:var(--text-faint)">不保留</span>{{end}}</td>
+            <td>
+              <span class="port">:{{.RemotePort}}</span>
+              {{if eq .Protocol "http"}}
+                <div class="route-info mono">{{if .Domains}}{{.Domains}}{{else}}任意域名{{end}}{{if .PathPrefix}}{{.PathPrefix}}{{else}}/{{end}}</div>
+                {{if .OfflinePage}}<div class="route-info">自定义不可用页面</div>{{end}}
+                <div class="route-info">IP 来源：<span class="mono">{{if .IPSources}}{{.IPSources}}{{else}}remote_addr{{end}}</span>{{if .TrustedProxies}} · 可信代理：<span class="mono">{{.TrustedProxies}}</span>{{end}}</div>
+              {{end}}
+            </td>
+            <td>{{if eq .Protocol "udp"}}<span style="color:var(--text-faint)">—</span>{{else if .PreserveSourceIP}}<span class="badge badge-amber">保留</span>{{else}}<span style="color:var(--text-faint)">不保留</span>{{end}}</td>
             <td>{{if .Enabled}}<span class="badge badge-green"><span class="dot"></span>启用</span>{{else}}<span class="badge badge-gray"><span class="dot"></span>停用</span>{{end}}</td>
             <td>
               <div class="btn-row">
+                <a class="btn btn-sm" href="/clients/{{$.Client.ID}}?edit={{.ID}}#rule-form">编辑</a>
                 <form class="inline" method="post" action="/rules/{{.ID}}/toggle">
                   <button class="btn btn-sm" type="submit">{{if .Enabled}}停用{{else}}启用{{end}}</button>
                 </form>
-                <form class="inline" method="post" action="/rules/{{.ID}}/delete" onsubmit="return confirm('确定删除该规则？公网端口将立即关闭。')">
+                <form class="inline" method="post" action="/rules/{{.ID}}/delete" onsubmit="return confirm('确定删除该规则？公网入口将立即关闭。')">
                   <button class="btn btn-danger btn-sm" type="submit">删除</button>
                 </form>
               </div>
@@ -83,50 +91,158 @@
     </div>
   </section>
 
-  <section class="card">
+  {{$e := .EditRule}}
+  <section class="card" id="rule-form">
+    {{if $e}}
+    <h2>编辑规则 #{{$e.ID}}</h2>
+    <p class="desc">修改后立即生效；如修改了公网端口，旧端口会被关闭。 <a href="/clients/{{.Client.ID}}">取消编辑</a></p>
+    <form method="post" action="/rules/{{$e.ID}}/edit" id="rule-editor">
+    {{else}}
     <h2>新建规则</h2>
-    <p class="desc">流量路径：访问者 → 服务器公网端口 → 内网机器 → 本地服务端口。</p>
-    <form method="post" action="/clients/{{.Client.ID}}/rules">
-      <div class="form-grid">
-        <div class="field">
-          <label for="f-name">规则名称</label>
-          <input id="f-name" name="name" placeholder="例如：web 服务" required>
-        </div>
-        <div class="field">
-          <label for="f-proto">协议</label>
-          <select id="f-proto" name="protocol">
-            <option value="tcp">TCP（网页 / SSH / 数据库等）</option>
-            <option value="udp">UDP</option>
-            <option value="tcp+udp">TCP+UDP 双栈（同一端口同时开启 TCP 和 UDP）</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="f-lip">本地 IP</label>
-          <input id="f-lip" name="local_ip" value="127.0.0.1">
-          <span class="help">服务在内网机器上的监听地址，通常保持 127.0.0.1</span>
-        </div>
-        <div class="field">
-          <label for="f-lport">本地端口（内网机器上）</label>
-          <input id="f-lport" name="local_port" value="80" inputmode="numeric" required>
-          <span class="help">内网机器上服务实际监听的端口</span>
-        </div>
-        <div class="field">
-          <label for="f-rport">公网端口（服务器上）</label>
-          <input id="f-rport" name="remote_port" value="8080" inputmode="numeric" required>
-          <span class="help">服务器对外开放的端口，1–65535，不能与本地端口混淆</span>
-        </div>
-        <div class="check-stack">
-          <label class="check"><input type="checkbox" name="preserve_source_ip" value="1" checked>保留来源 IP</label>
-          <label class="check"><input type="checkbox" name="enabled" value="1" checked>创建后立即启用</label>
-        </div>
+    <p class="desc">第一步选择协议，第二步填写端口等信息。流量路径：访问者 → 服务器公网端口 → 内网机器 → 本地服务端口。</p>
+    <form method="post" action="/clients/{{.Client.ID}}/rules" id="rule-editor">
+    {{end}}
+
+      <div class="step-title"><span class="step-no">1</span>选择协议</div>
+      <div class="proto-picker" role="radiogroup" aria-label="协议">
+        <label class="proto-opt">
+          <input type="radio" name="protocol" value="http" {{if $e}}{{if eq $e.Protocol "http"}}checked{{end}}{{end}} required>
+          <span class="proto-card"><b>HTTP</b><small>网站 / API，支持 WebSocket、SSE；多个服务可按域名共享一个端口</small></span>
+        </label>
+        <label class="proto-opt">
+          <input type="radio" name="protocol" value="tcp" {{if $e}}{{if eq $e.Protocol "tcp"}}checked{{end}}{{end}}>
+          <span class="proto-card"><b>TCP</b><small>SSH / 数据库 / 游戏等任意 TCP 服务，独占端口</small></span>
+        </label>
+        <label class="proto-opt">
+          <input type="radio" name="protocol" value="udp" {{if $e}}{{if eq $e.Protocol "udp"}}checked{{end}}{{end}}>
+          <span class="proto-card"><b>UDP</b><small>DNS / 语音 / 游戏等 UDP 服务</small></span>
+        </label>
+        <label class="proto-opt">
+          <input type="radio" name="protocol" value="tcp+udp" {{if $e}}{{if eq $e.Protocol "tcp+udp"}}checked{{end}}{{end}}>
+          <span class="proto-card"><b>TCP+UDP</b><small>同一端口同时开启 TCP 和 UDP</small></span>
+        </label>
       </div>
-      <div class="form-actions">
-        <button class="btn btn-primary" type="submit">创建规则</button>
+
+      <div id="rule-step2" class="step2">
+        <div class="step-title"><span class="step-no">2</span>填写服务信息</div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="f-name">规则名称</label>
+            <input id="f-name" name="name" placeholder="例如：web 服务" value="{{if $e}}{{$e.Name}}{{end}}" required>
+          </div>
+          <div class="field">
+            <label for="f-lip">本地 IP</label>
+            <input id="f-lip" name="local_ip" value="{{if $e}}{{$e.LocalIP}}{{else}}127.0.0.1{{end}}">
+            <span class="help">服务在内网机器上的监听地址，通常保持 127.0.0.1</span>
+          </div>
+          <div class="field">
+            <label for="f-lport">本地端口（内网机器上）</label>
+            <input id="f-lport" name="local_port" value="{{if $e}}{{$e.LocalPort}}{{else}}80{{end}}" inputmode="numeric" required>
+            <span class="help">内网机器上服务实际监听的端口</span>
+          </div>
+          <div class="field">
+            <label for="f-rport">公网端口（服务器上）</label>
+            <input id="f-rport" name="remote_port" value="{{if $e}}{{$e.RemotePort}}{{else}}8080{{end}}" inputmode="numeric" required {{if $e}}data-touched="1"{{end}}>
+            <span class="help" data-proto-show="http">HTTP 规则可与其他 HTTP 规则共用同一端口（如 80）</span>
+            <span class="help" data-proto-show="tcp udp tcp+udp">服务器对外开放的端口，1–65535，由该规则独占</span>
+          </div>
+
+          <div class="field span-all" data-proto-show="http">
+            <label for="f-domains">绑定域名</label>
+            <input id="f-domains" name="domains" placeholder="例如：app.example.com, *.example.com" value="{{if $e}}{{$e.Domains}}{{end}}">
+            <span class="help">多个域名用逗号分隔，支持 *.example.com 通配；留空则匹配该端口上所有未被其他规则认领的域名（兜底）。域名需解析到本服务器。</span>
+          </div>
+          <div class="field" data-proto-show="http">
+            <label for="f-path">路径前缀</label>
+            <input id="f-path" name="path_prefix" placeholder="/" value="{{if $e}}{{$e.PathPrefix}}{{end}}">
+            <span class="help">例如 /api；同一域名下按最长前缀匹配，留空为 /</span>
+          </div>
+          <div class="field span-all" data-proto-show="http">
+            <label for="f-offline">自定义“服务不可用”页面（HTML，可选）</label>
+            <textarea id="f-offline" name="offline_page" rows="6" placeholder="&lt;h1&gt;维护中，请稍后再试&lt;/h1&gt;">{{if $e}}{{$e.OfflinePage}}{{end}}</textarea>
+            <span class="help">内网机器离线或本地服务未启动时，以 503 状态码返回此页面；留空使用内置默认页面。上限 64 KB。</span>
+          </div>
+          <div class="field span-all" data-proto-show="http">
+            <label for="f-ipsrc">真实 IP 来源（按优先级）</label>
+            <input id="f-ipsrc" name="ip_sources" value="{{if $e}}{{$e.IPSources}}{{end}}" placeholder="remote_addr">
+            <div class="ipsrc-chips" id="ipsrc-chips">
+              <button type="button" class="btn btn-sm" data-src="remote_addr">TCP 对端地址</button>
+              <button type="button" class="btn btn-sm" data-src="x-forwarded-for">X-Forwarded-For</button>
+              <button type="button" class="btn btn-sm" data-src="x-real-ip">X-Real-IP</button>
+              <button type="button" class="btn btn-sm" data-src="cf-connecting-ip">CF-Connecting-IP</button>
+              <button type="button" class="btn btn-sm" data-src="true-client-ip">True-Client-IP</button>
+              <button type="button" class="btn btn-sm" data-src="x-client-ip">X-Client-IP</button>
+              <button type="button" class="btn btn-sm" data-src="forwarded">Forwarded</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-src="">清空</button>
+            </div>
+            <span class="help">依次点击添加，越靠前优先级越高；第一个能解析出合法 IP 的来源生效，都没有时使用 TCP 对端地址。提取出的 IP 会用于后端源地址伪装（需开启“保留来源 IP”），并写入 X-Real-IP / X-Forwarded-For / Forwarded 请求头。留空等同于仅使用 TCP 对端地址。</span>
+          </div>
+          <div class="field span-all" data-proto-show="http">
+            <label for="f-trusted">可信代理（IP / CIDR，可选）</label>
+            <input id="f-trusted" name="trusted_proxies" value="{{if $e}}{{$e.TrustedProxies}}{{end}}" placeholder="例如：173.245.48.0/20, 103.21.244.0/22">
+            <span class="help">填写后，只有来自这些地址的请求才信任请求头中的 IP，其它请求一律使用 TCP 对端地址并剥离伪造的 IP 头。留空表示信任所有请求头（仅在前面一定有 CDN / 反代时使用）。</span>
+          </div>
+
+          <div class="check-stack">
+            <label class="check" data-proto-show="http tcp tcp+udp"><input type="checkbox" name="preserve_source_ip" value="1" {{if $e}}{{if $e.PreserveSourceIP}}checked{{end}}{{else}}checked{{end}}>保留来源 IP</label>
+            <label class="check"><input type="checkbox" name="enabled" value="1" {{if $e}}{{if $e.Enabled}}checked{{end}}{{else}}checked{{end}}>{{if $e}}启用{{else}}创建后立即启用{{end}}</label>
+          </div>
+        </div>
+        <div class="form-actions">
+          {{if $e}}<a class="btn" href="/clients/{{.Client.ID}}">取消</a>{{end}}
+          <button class="btn btn-primary" type="submit">{{if $e}}保存修改{{else}}创建规则{{end}}</button>
+        </div>
       </div>
     </form>
   </section>
 
   <div class="foot">OpenNoFrp · 纯用户态内网穿透</div>
 </main>
+
+<script>
+(function () {
+  var form = document.getElementById('rule-editor');
+  if (!form) return;
+  var step2 = document.getElementById('rule-step2');
+  var rport = document.getElementById('f-rport');
+  rport.addEventListener('input', function () { rport.dataset.touched = '1'; });
+
+  function current() {
+    var c = form.querySelector('input[name=protocol]:checked');
+    return c ? c.value : '';
+  }
+  function apply() {
+    var proto = current();
+    step2.hidden = !proto;
+    form.querySelectorAll('[data-proto-show]').forEach(function (el) {
+      var show = el.getAttribute('data-proto-show').split(' ').indexOf(proto) >= 0;
+      el.hidden = !show;
+      el.querySelectorAll('input, textarea, select').forEach(function (i) { i.disabled = !show; });
+    });
+    if (proto && !rport.dataset.touched) {
+      rport.value = proto === 'http' ? '80' : '8080';
+    }
+  }
+  form.querySelectorAll('input[name=protocol]').forEach(function (r) {
+    r.addEventListener('change', apply);
+  });
+
+  // 真实 IP 来源：点击按钮按顺序追加到输入框（去重），“清空”重置。
+  var ipsrc = document.getElementById('f-ipsrc');
+  var chips = document.getElementById('ipsrc-chips');
+  if (ipsrc && chips) {
+    chips.querySelectorAll('button[data-src]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var src = b.getAttribute('data-src');
+        if (!src) { ipsrc.value = ''; return; }
+        var list = ipsrc.value.split(/[\s,;]+/).filter(function (s) { return s; });
+        if (list.indexOf(src) < 0) list.push(src);
+        ipsrc.value = list.join(',');
+      });
+    });
+  }
+  apply();
+})();
+</script>
 </body>
 </html>
