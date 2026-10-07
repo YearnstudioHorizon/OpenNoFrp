@@ -15,7 +15,9 @@ package listener
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -173,9 +175,12 @@ const (
 
 func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 	transport := &http.Transport{
-		// 每个请求使用独立的 yamux 流：Client 侧需要按访问者的源地址拨号（保留
-		// 源 IP），连接池复用会把不同访问者/不同规则的请求混在同一条后端连接上。
-		DisableKeepAlives:     true,
+		// 后端连接复用：Rewrite 把 URL.Host 设为由 (规则, 访问者源 IP, 会话) 派生的
+		// 合成主机名（见 backendPoolKey），http.Transport 按该键分池，因此同一访问者
+		// 对同一规则的请求可复用已拨通的 yamux 流（Client 侧以访问者 IP 伪装拨号的
+		// 后端连接也随之复用），而不同访问者/规则/会话之间绝不会混用连接。
+		MaxIdleConnsPerHost:   4,
+		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: 0,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			route, _ := ctx.Value(ctxKeyRoute).(httpRoute)
@@ -202,12 +207,12 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		FlushInterval: -1, // SSE / 流式响应立即刷新
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "http"
-			pr.Out.URL.Host = pr.In.Host
-			if pr.Out.URL.Host == "" {
-				pr.Out.URL.Host = "backend"
-			}
-			pr.Out.Host = pr.In.Host // 保留原始 Host，后端可据此做虚拟主机
 			route, _ := pr.In.Context().Value(ctxKeyRoute).(httpRoute)
+			sess, _ := pr.In.Context().Value(ctxKeySession).(*session.Session)
+			remote, _ := pr.In.Context().Value(ctxKeyRemote).(*net.TCPAddr)
+			// URL.Host 只用作连接池键（DialContext 忽略地址），真正的 Host 头见下。
+			pr.Out.URL.Host = backendPoolKey(route.RuleID, remote, sess)
+			pr.Out.Host = pr.In.Host // 保留原始 Host，后端可据此做虚拟主机
 			realIP, _ := pr.In.Context().Value(ctxKeyRealIP).(net.IP)
 			// 按规则配置的 IP 来源优先级改写 X-Real-IP / X-Forwarded-* / Forwarded 等头
 			rewriteForwardHeaders(pr.In, pr.Out.Header, route, realIP)
@@ -321,6 +326,22 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		}
 		proxy.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// backendPoolKey 返回 http.Transport 连接池使用的合成主机名：由规则 ID、访问者源 IP
+// 与会话 ID 派生（哈希后只含 [0-9a-f]），保证不同访问者/规则/会话（Client 重连后
+// 旧会话的流已失效）之间绝不复用同一条后端连接。
+func backendPoolKey(ruleID uint32, remote *net.TCPAddr, sess *session.Session) string {
+	ip := ""
+	if remote != nil && remote.IP != nil {
+		ip = remote.IP.String()
+	}
+	sid := ""
+	if sess != nil {
+		sid = sess.ID
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%s", ruleID, ip, sid)))
+	return "b" + hex.EncodeToString(sum[:12]) + ".opennofrp"
 }
 
 func clientIPOf(r *http.Request) string {
