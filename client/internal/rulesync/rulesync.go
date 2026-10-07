@@ -179,7 +179,7 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 			return
 		}
 		defer upstream.Close()
-		relay(stream, upstream)
+		r.relayUpstream(rule, meta, stream, upstream)
 		return
 	}
 
@@ -196,7 +196,7 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 			return
 		}
 		defer upstream.Close()
-		relay(stream, upstream)
+		r.relayUpstream(rule, meta, stream, upstream)
 		return
 	}
 
@@ -209,7 +209,7 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 				return
 			}
 			defer upstream.Close()
-			relay(stream, upstream)
+			r.relayUpstream(rule, meta, stream, upstream)
 			return
 		}
 		dialer := tproxy.SpoofedDialer{FWMark: sharedFWMark}
@@ -219,7 +219,7 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 			return
 		}
 		defer upstream.Close()
-		relay(stream, upstream)
+		r.relayUpstream(rule, meta, stream, upstream)
 
 	case envcheck.OwnerDockerBridgeNetwork:
 		cns := netnsworker.ContainerNetns{PID: owner.PID}
@@ -231,7 +231,7 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 				return
 			}
 			defer upstream.Close()
-			relay(stream, upstream)
+			r.relayUpstream(rule, meta, stream, upstream)
 			return
 		}
 
@@ -262,7 +262,7 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 			return
 		case upstream := <-upstreamCh:
 			defer upstream.Close()
-			relay(stream, upstream)
+			r.relayUpstream(rule, meta, stream, upstream)
 		}
 
 	default:
@@ -272,7 +272,7 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 			return
 		}
 		defer upstream.Close()
-		relay(stream, upstream)
+		r.relayUpstream(rule, meta, stream, upstream)
 	}
 }
 

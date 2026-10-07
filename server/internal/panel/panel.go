@@ -383,6 +383,12 @@ func friendlyMsg(s string) string {
 	if s == "too many backends" {
 		return "额外后端过多（上限 32 个）"
 	}
+	if s == "bad proxy protocol" {
+		return "Proxy Protocol 版本无效，仅支持关闭、v1 或 v2"
+	}
+	if s == "proxy protocol udp" {
+		return "UDP 规则不支持 Proxy Protocol"
+	}
 	if s == "bad lb strategy" {
 		return "负载均衡策略无效，仅支持轮询、随机或主备"
 	}
@@ -844,6 +850,17 @@ func (p *Panel) parseRuleForm(r *http.Request, clientID string, excludeID int64)
 		default:
 			return store.Rule{}, "bad lb strategy"
 		}
+	}
+	// Proxy Protocol v1/v2：Client 拨通后端后先写入 PROXY 头（tcp/http/tls 规则）。
+	switch pp := strings.TrimSpace(r.FormValue("proxy_protocol")); pp {
+	case "", "0":
+	case "1", "2":
+		if protocol == "udp" {
+			return store.Rule{}, "proxy protocol udp"
+		}
+		rule.ProxyProtocol, _ = strconv.Atoi(pp)
+	default:
+		return store.Rule{}, "bad proxy protocol"
 	}
 	conflict, err := p.Store.RuleConflict(r.Context(), rule)
 	if err != nil {

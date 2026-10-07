@@ -627,7 +627,8 @@ func toWireRules(rules []store.Rule) []protocol.Rule {
 			Backends: strings.FieldsFunc(r.Backends, func(c rune) bool {
 				return c == ',' || c == ' ' || c == ';' || c == '\n' || c == '\r' || c == '\t'
 			}),
-			LBStrategy: r.LBStrategy,
+			LBStrategy:    r.LBStrategy,
+			ProxyProtocol: r.ProxyProtocol,
 		})
 	}
 	return out

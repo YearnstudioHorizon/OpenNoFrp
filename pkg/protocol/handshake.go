@@ -151,6 +151,9 @@ type Rule struct {
 	// "failover" = 按顺序优先使用第一个健康后端。所有策略在拨号失败时都会依次
 	// 尝试其余后端；Client 会对多后端规则做周期性 TCP 健康检查并跳过不健康后端。
 	LBStrategy string `json:"lb_strategy,omitempty"`
+	// ProxyProtocol 为 1 或 2 时，Client 在拨通后端后先写入 PROXY 协议 v1/v2 头，
+	// 携带访问者真实源地址；0 表示不发送。需要 Client 声明 CapProxyProtocol。
+	ProxyProtocol int `json:"proxy_protocol,omitempty"`
 }
 
 // RulesSnapshot 由 Server 推送给已连接的 Client：握手成功后立即推送一次，此后在

@@ -259,6 +259,15 @@
             </select>
             <span class="help">仅在填写了额外后端时生效</span>
           </div>
+          <div class="field" data-proto-show="http tls tcp tcp+udp">
+            <label for="f-pp">Proxy Protocol</label>
+            <select id="f-pp" name="proxy_protocol">
+              <option value="0" {{if $e}}{{if eq $e.ProxyProtocol 0}}selected{{end}}{{end}}>关闭</option>
+              <option value="1" {{if $e}}{{if eq $e.ProxyProtocol 1}}selected{{end}}{{end}}>v1（文本）</option>
+              <option value="2" {{if $e}}{{if eq $e.ProxyProtocol 2}}selected{{end}}{{end}}>v2（二进制）</option>
+            </select>
+            <span class="help">内网机器拨通后端后先发送 PROXY 头携带访问者真实 IP，后端（nginx / HAProxy 等）需开启 proxy_protocol，否则会解析失败。仅 TCP 连接生效。</span>
+          </div>
           <div class="field span-all">
             <label for="f-gallow">访问白名单（IP / CIDR，可选）</label>
             <input id="f-gallow" name="guard_allow" value="{{if $e}}{{$e.GuardAllow}}{{end}}" placeholder="例如：203.0.113.0/24, 198.51.100.7">
