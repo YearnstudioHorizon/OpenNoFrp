@@ -383,6 +383,15 @@ func friendlyMsg(s string) string {
 	if s == "too many backends" {
 		return "额外后端过多（上限 32 个）"
 	}
+	if s == "bad port range" {
+		return "端口段无效：结束端口须不小于起始端口，单条规则最多 1000 个端口，且映射后的本地端口不能超过 65535"
+	}
+	if s == "port range protocol" {
+		return "端口段仅支持 TCP、UDP 或 TCP+UDP 规则"
+	}
+	if s == "port range backends" {
+		return "端口段规则不支持多后端负载均衡"
+	}
 	if s == "bad proxy protocol" {
 		return "Proxy Protocol 版本无效，仅支持关闭、v1 或 v2"
 	}
@@ -861,6 +870,30 @@ func (p *Panel) parseRuleForm(r *http.Request, clientID string, excludeID int64)
 		rule.ProxyProtocol, _ = strconv.Atoi(pp)
 	default:
 		return store.Rule{}, "bad proxy protocol"
+	}
+	// 端口段规则：公网端口 remote_port..remote_port_end 依次映射到 local_port..（仅 tcp/udp/tcp+udp）。
+	if v := strings.TrimSpace(r.FormValue("remote_port_end")); v != "" && v != "0" {
+		end, err := strconv.Atoi(v)
+		if err != nil || end < remotePort || end > 65535 {
+			return store.Rule{}, "bad port range"
+		}
+		if end > remotePort {
+			if protocol != "tcp" && protocol != "udp" && protocol != "tcp+udp" {
+				return store.Rule{}, "port range protocol"
+			}
+			if end-remotePort+1 > 1000 || localPort+(end-remotePort) > 65535 {
+				return store.Rule{}, "bad port range"
+			}
+			if rule.Backends != "" {
+				return store.Rule{}, "port range backends"
+			}
+			for port := remotePort; port <= end; port++ {
+				if reason, isReserved := reserved[uint16(port)]; isReserved {
+					return store.Rule{}, fmt.Sprintf("remote_port %d is reserved (%s)", port, reason)
+				}
+			}
+			rule.RemotePortEnd = uint16(end)
+		}
 	}
 	conflict, err := p.Store.RuleConflict(r.Context(), rule)
 	if err != nil {

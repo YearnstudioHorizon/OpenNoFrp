@@ -91,6 +91,12 @@ func (s *Session) PushRulesSnapshot(rules []protocol.Rule) error {
 // StreamMetadata 头部（使 Client 知道原始客户端地址以及该连接所属的规则），
 // 然后双向转发字节，直到任意一方关闭。
 func (s *Session) OpenStreamFor(publicConn net.Conn, ruleID uint32) error {
+	return s.OpenStreamForOffset(publicConn, ruleID, 0)
+}
+
+// OpenStreamForOffset 与 OpenStreamFor 相同，但携带端口段规则的端口偏移（见
+// StreamMetadata.PortOffset），Client 据此拨号 LocalPort+offset。
+func (s *Session) OpenStreamForOffset(publicConn net.Conn, ruleID uint32, offset uint16) error {
 	stream, err := s.Yamux.Open()
 	if err != nil {
 		return fmt.Errorf("session: open yamux stream: %w", err)
@@ -108,6 +114,7 @@ func (s *Session) OpenStreamFor(publicConn net.Conn, ruleID uint32) error {
 		ClientAddr: tcpAddr.IP,
 		ClientPort: uint16(tcpAddr.Port),
 		RuleID:     ruleID,
+		PortOffset: offset,
 	}
 	if err := meta.WriteHeader(stream); err != nil {
 		stream.Close()
@@ -123,6 +130,11 @@ func (s *Session) OpenStreamFor(publicConn net.Conn, ruleID uint32) error {
 // 形式承载数据报：每个数据报为 2 字节大端序长度 + 负载。Client 在其本地 UDP
 // socket 上使用相同的分帧方式，因此数据报在穿越控制连接时能保留边界。
 func (s *Session) OpenUDPStream(remoteAddr *net.UDPAddr, ruleID uint32) (net.Conn, error) {
+	return s.OpenUDPStreamOffset(remoteAddr, ruleID, 0)
+}
+
+// OpenUDPStreamOffset 与 OpenUDPStream 相同，但携带端口段规则的端口偏移。
+func (s *Session) OpenUDPStreamOffset(remoteAddr *net.UDPAddr, ruleID uint32, offset uint16) (net.Conn, error) {
 	stream, err := s.Yamux.Open()
 	if err != nil {
 		return nil, fmt.Errorf("session: open yamux stream (udp): %w", err)
@@ -132,6 +144,7 @@ func (s *Session) OpenUDPStream(remoteAddr *net.UDPAddr, ruleID uint32) (net.Con
 		ClientAddr: remoteAddr.IP,
 		ClientPort: uint16(remoteAddr.Port),
 		RuleID:     ruleID,
+		PortOffset: offset,
 	}
 	if err := meta.WriteHeader(stream); err != nil {
 		stream.Close()

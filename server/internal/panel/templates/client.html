@@ -63,7 +63,7 @@
             <td>{{if eq .Protocol "http"}}<span class="badge badge-green">HTTP</span>{{else if eq .Protocol "tls"}}<span class="badge badge-amber">TLS</span>{{else if eq .Protocol "tcp+udp"}}<span class="badge badge-blue">TCP</span> <span class="badge badge-purple">UDP</span>{{else if eq .Protocol "udp"}}<span class="badge badge-purple">UDP</span>{{else}}<span class="badge badge-blue">TCP</span>{{end}}</td>
             <td class="mono" style="font-size:13px">{{.LocalIP}}:{{.LocalPort}}</td>
             <td>
-              <span class="port">:{{.RemotePort}}</span>
+              <span class="port">:{{.RemotePort}}{{if .RemotePortEnd}}-{{.RemotePortEnd}}{{end}}</span>
               {{if eq .Protocol "tls"}}<div class="route-info mono">SNI：{{if .Domains}}{{.Domains}}{{else}}任意域名{{end}}</div>{{end}}
               {{if eq .Protocol "http"}}
                 <div class="route-info mono">{{if .Domains}}{{.Domains}}{{else}}任意域名{{end}}{{if .PathPrefix}}{{.PathPrefix}}{{else}}/{{end}}</div>
@@ -154,6 +154,11 @@
             <span class="help" data-proto-show="http">HTTP 规则可与其他 HTTP 规则共用同一端口（如 80）</span>
             <span class="help" data-proto-show="tls">TLS 透传规则可与其他 TLS 透传规则按 SNI 共用同一端口（如 443）</span>
             <span class="help" data-proto-show="tcp udp tcp+udp">服务器对外开放的端口，1–65535，由该规则独占</span>
+          </div>
+          <div class="field" data-proto-show="tcp udp tcp+udp">
+            <label for="f-rportend">公网结束端口（端口段，可选）</label>
+            <input id="f-rportend" name="remote_port_end" value="{{if $e}}{{if $e.RemotePortEnd}}{{$e.RemotePortEnd}}{{end}}{{end}}" placeholder="留空 = 单端口" inputmode="numeric">
+            <span class="help">填写后公网端口 起始..结束 依次映射到本地端口 本地端口..（如 10000-10099 → 20000-20099），最多 1000 个端口</span>
           </div>
 
           <div class="field span-all" data-proto-show="http tls">

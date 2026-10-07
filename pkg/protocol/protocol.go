@@ -76,11 +76,16 @@ type StreamMetadata struct {
 	// 编码在尾部变长区段中（TLV：type=TrailerSNI, uint16 长度, 值）。旧版 Client
 	// 会读出并丢弃尾部区段，因此保持向后兼容。
 	SNI string
+	// PortOffset 是端口段规则中该连接的公网端口相对规则起始端口的偏移，Client
+	// 据此拨号本地端口 LocalPort+PortOffset。编码在尾部区段（TLV：type=
+	// TrailerPortOffset, uint16 长度=2, uint16 值）；为 0 时不编码。
+	PortOffset uint16
 }
 
 // 尾部区段 TLV 类型。
 const (
-	TrailerSNI byte = 1
+	TrailerSNI        byte = 1
+	TrailerPortOffset byte = 2
 )
 
 // encodeTrailer 将可选扩展字段编码为尾部区段。
@@ -89,6 +94,9 @@ func (m StreamMetadata) encodeTrailer() []byte {
 	if m.SNI != "" && len(m.SNI) <= 255 {
 		out = append(out, TrailerSNI, 0, byte(len(m.SNI)))
 		out = append(out, m.SNI...)
+	}
+	if m.PortOffset != 0 {
+		out = append(out, TrailerPortOffset, 0, 2, byte(m.PortOffset>>8), byte(m.PortOffset))
 	}
 	return out
 }
@@ -105,6 +113,10 @@ func (m *StreamMetadata) decodeTrailer(b []byte) {
 		switch t {
 		case TrailerSNI:
 			m.SNI = string(b[:n])
+		case TrailerPortOffset:
+			if n == 2 {
+				m.PortOffset = binary.BigEndian.Uint16(b[:2])
+			}
 		}
 		b = b[n:]
 	}

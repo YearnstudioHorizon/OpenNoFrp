@@ -24,6 +24,11 @@ type RuleView struct {
 	Protocol string // "tcp"、"udp"、"tcp+udp"（双栈）或 "http"
 	Port     uint16
 
+	// PortEnd 非 0 时表示端口段规则（仅 tcp/udp/tcp+udp），Reconcile 会展开为逐端口视图。
+	PortEnd uint16
+	// PortOffset 是展开后该端口相对规则起始端口的偏移（由 Reconcile 设置）。
+	PortOffset uint16
+
 	// 以下字段仅用于 http 规则。
 	Name        string
 	Domains     []string // 已规范化；为空表示匹配任意 Host
@@ -70,6 +75,30 @@ func expandRule(r RuleView) []RuleView {
 	return []RuleView{r}
 }
 
+// maxPortRangeSize 限制单条端口段规则展开的端口数量。
+const maxPortRangeSize = 1000
+
+// expandPortRange 将端口段规则（PortEnd > Port）展开为逐端口视图，每个视图的
+// PortOffset 为相对起始端口的偏移。非端口段规则原样返回。
+func expandPortRange(r RuleView) []RuleView {
+	if r.PortEnd <= r.Port || (r.Protocol != "tcp" && r.Protocol != "udp" && r.Protocol != "tcp+udp") {
+		return []RuleView{r}
+	}
+	end := uint32(r.PortEnd)
+	if end-uint32(r.Port)+1 > maxPortRangeSize {
+		end = uint32(r.Port) + maxPortRangeSize - 1
+	}
+	out := make([]RuleView, 0, end-uint32(r.Port)+1)
+	for p := uint32(r.Port); p <= end; p++ {
+		v := r
+		v.Port = uint16(p)
+		v.PortOffset = uint16(p - uint32(r.Port))
+		v.PortEnd = 0
+		out = append(out, v)
+	}
+	return out
+}
+
 // ruleView 保留旧的未导出别名形式；新代码请使用 RuleView。
 type ruleView = RuleView
 
@@ -105,6 +134,7 @@ type tcpListener struct {
 	ln       net.Listener
 	ruleID   uint32
 	clientID string
+	offset   uint16 // 端口段规则中的端口偏移
 	done     chan struct{}
 }
 
@@ -112,6 +142,7 @@ type udpListener struct {
 	conn     *net.UDPConn
 	ruleID   uint32
 	clientID string
+	offset   uint16 // 端口段规则中的端口偏移
 	done     chan struct{}
 	flows    map[string]*udpFlow
 }
@@ -180,7 +211,7 @@ func (m *Manager) openTCP(r ruleView) error {
 	if err != nil {
 		return fmt.Errorf("listener: tcp listen on %s: %w", addr, err)
 	}
-	tl := &tcpListener{ln: ln, ruleID: r.ID, clientID: r.ClientID, done: make(chan struct{})}
+	tl := &tcpListener{ln: ln, ruleID: r.ID, clientID: r.ClientID, offset: r.PortOffset, done: make(chan struct{})}
 	m.tcp[r.Port] = tl
 	go m.tcpAcceptLoop(addr, tl)
 	m.Logger.Info("opened public TCP listener", "port", r.Port, "rule_id", r.ID)
@@ -222,7 +253,7 @@ func (m *Manager) tcpAcceptLoop(_ string, tl *tcpListener) {
 		}
 		done := m.statOpened(tl.ruleID)
 		conn = g.wrapConn(m.countConn(tl.ruleID, &releaseConn{Conn: conn, release: func() { release(); done() }}, false))
-		if err := sess.OpenStreamFor(conn, tl.ruleID); err != nil {
+		if err := sess.OpenStreamForOffset(conn, tl.ruleID, tl.offset); err != nil {
 			m.Logger.Error("failed to forward connection to client", "rule_id", tl.ruleID, "error", err)
 			conn.Close()
 		}
@@ -247,7 +278,7 @@ func (m *Manager) openUDP(r ruleView) error {
 	if err != nil {
 		return fmt.Errorf("listener: udp listen on %s: %w", addr, err)
 	}
-	ul := &udpListener{conn: conn, ruleID: r.ID, clientID: r.ClientID, done: make(chan struct{}), flows: make(map[string]*udpFlow)}
+	ul := &udpListener{conn: conn, ruleID: r.ID, clientID: r.ClientID, offset: r.PortOffset, done: make(chan struct{}), flows: make(map[string]*udpFlow)}
 	m.udp[r.Port] = ul
 	go m.udpLoop(ul)
 	m.Logger.Info("opened public UDP listener", "port", r.Port, "rule_id", r.ID)
@@ -286,7 +317,7 @@ func (m *Manager) udpLoop(ul *udpListener) {
 				m.Logger.Warn("udp datagram for offline client, dropping", "rule_id", ul.ruleID, "remote", key)
 				continue
 			}
-			stream, err := sess.OpenUDPStream(remote, ul.ruleID)
+			stream, err := sess.OpenUDPStreamOffset(remote, ul.ruleID, ul.offset)
 			if err != nil {
 				release()
 				m.Logger.Error("failed to open udp stream", "rule_id", ul.ruleID, "error", err)
@@ -446,9 +477,11 @@ func (m *Manager) Reconcile(desired []RuleView) {
 			tlsRules = append(tlsRules, r)
 			continue
 		}
-		// 双栈规则会变成两个条目：tcp:port 和 udp:port
-		for _, v := range expandRule(r) {
-			want[fmt.Sprintf("%s:%d", v.Protocol, v.Port)] = v
+		// 端口段规则先展开为逐端口视图；双栈规则会变成两个条目：tcp:port 和 udp:port
+		for _, pr := range expandPortRange(r) {
+			for _, v := range expandRule(pr) {
+				want[fmt.Sprintf("%s:%d", v.Protocol, v.Port)] = v
+			}
 		}
 	}
 	have := m.OpenPorts()

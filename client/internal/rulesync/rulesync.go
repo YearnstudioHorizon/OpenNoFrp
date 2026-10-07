@@ -94,6 +94,18 @@ func (r *Reconciler) ServeStream(ctx context.Context, meta protocol.StreamMetada
 		}
 		return
 	}
+	// 端口段规则：按该连接的公网端口偏移映射到对应的本地端口。
+	if meta.PortOffset != 0 {
+		if rule.RemotePortEnd == 0 || uint32(rule.LocalPort)+uint32(meta.PortOffset) > 65535 {
+			r.Logger.Error("stream port offset out of range, dropping", "rule_id", meta.RuleID, "offset", meta.PortOffset)
+			if meta.HasFlag(protocol.FlagDialAck) {
+				_, _ = stream.Write([]byte{protocol.DialAckFailed})
+			}
+			return
+		}
+		rule.LocalPort += meta.PortOffset
+		rule.Backends = nil // 端口段规则不支持多后端
+	}
 
 	switch meta.Transport {
 	case protocol.TransportTCP:

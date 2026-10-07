@@ -154,6 +154,10 @@ type Rule struct {
 	// ProxyProtocol 为 1 或 2 时，Client 在拨通后端后先写入 PROXY 协议 v1/v2 头，
 	// 携带访问者真实源地址；0 表示不发送。需要 Client 声明 CapProxyProtocol。
 	ProxyProtocol int `json:"proxy_protocol,omitempty"`
+	// RemotePortEnd 非 0 时表示端口段规则：公网端口 RemotePort..RemotePortEnd 依次映射到
+	// 本地端口 LocalPort..LocalPort+(RemotePortEnd-RemotePort)。每个连接的偏移通过
+	// StreamMetadata.PortOffset 告知 Client。需要 Client 声明 CapPortRange。
+	RemotePortEnd uint16 `json:"remote_port_end,omitempty"`
 }
 
 // RulesSnapshot 由 Server 推送给已连接的 Client：握手成功后立即推送一次，此后在

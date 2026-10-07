@@ -36,6 +36,7 @@ var ClientCapabilities = []string{
 	protocol.CapSNIHint,
 	protocol.CapProxyProtocol,
 	protocol.CapUDPSpoof,
+	protocol.CapPortRange,
 }
 
 // Client 管理到一个 OpenNoFrp Server 的一条逻辑连接，包括自动重连。

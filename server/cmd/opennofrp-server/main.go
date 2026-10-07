@@ -295,7 +295,7 @@ func (s *server) reconcileListeners(ctx context.Context) {
 	}
 	desired := make([]listener.RuleView, 0, len(rules))
 	for _, r := range rules {
-		v := listener.RuleView{ID: uint32(r.ID), ClientID: r.ClientID, Protocol: r.Protocol, Port: r.RemotePort}
+		v := listener.RuleView{ID: uint32(r.ID), ClientID: r.ClientID, Protocol: r.Protocol, Port: r.RemotePort, PortEnd: r.RemotePortEnd}
 		if r.Protocol == "http" {
 			v.Name = r.Name
 			v.Domains = store.SplitDomains(r.Domains)
@@ -629,6 +629,7 @@ func toWireRules(rules []store.Rule) []protocol.Rule {
 			}),
 			LBStrategy:    r.LBStrategy,
 			ProxyProtocol: r.ProxyProtocol,
+			RemotePortEnd: r.RemotePortEnd,
 		})
 	}
 	return out
