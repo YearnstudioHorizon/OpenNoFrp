@@ -171,6 +171,13 @@ func runServer() {
 	// 管理面板。
 	p := panel.New(st, logger, s.onAnyRuleChanged, cfg.Server.PublicBaseURL,
 		hostFromAddr(cfg.Server.BindAddr), cfg.Server.ControlPort, fingerprint, cfg.Server.ClientBinDir)
+	p.ClientStatus = func(clientID string) (bool, string, []string) {
+		sess := s.sessionFor(clientID)
+		if sess == nil {
+			return false, "", nil
+		}
+		return true, sess.ClientVersion, sess.Capabilities
+	}
 	panelAddr := fmt.Sprintf("%s:%d", cfg.Server.PanelAddr, cfg.Server.PanelPort)
 	httpSrv := &http.Server{Addr: panelAddr, Handler: p.Handler()}
 	go func() {
@@ -366,6 +373,12 @@ func (s *server) handleControlConn(conn net.Conn) {
 	}
 
 	sess := session.New(newSessionID(), req.ClientID, ym, s.logger, ctrlStream)
+	sess.ClientVersion = req.ClientVersion
+	sess.Capabilities = append([]string(nil), req.Capabilities...)
+	if !sess.HasCapability(protocol.CapDialAck) {
+		s.logger.Warn("client does not support dial_ack; HTTP/TLS rules for it will return the unavailable page until it is upgraded",
+			"client_id", req.ClientID, "client_version", req.ClientVersion)
+	}
 	s.registerSession(sess)
 	defer s.unregisterSession(sess)
 

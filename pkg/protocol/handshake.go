@@ -38,6 +38,34 @@ type HandshakeRequest struct {
 	ClientID        string             `json:"client_id"`
 	ClientSecret    string             `json:"client_secret"`
 	ClientVersion   string             `json:"client_version"`
+	// Capabilities 列出该 Client 支持的可选能力（见 Cap* 常量）。旧版 Client 不发送
+	// 该字段，Server 据此判定其不支持依赖新能力的规则（例如 HTTP 规则需要
+	// CapDialAck），并在面板中提示升级，而不是让访问者等待超时。
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// Client 能力标识。
+const (
+	// CapDialAck：支持 StreamMetadata FlagDialAck 拨号确认（HTTP/TLS 规则必需）。
+	CapDialAck = "dial_ack"
+	// CapSNIHint：支持 StreamMetadata 尾部区段中的 SNI 提示（TLS 透传规则）。
+	CapSNIHint = "sni_hint"
+	// CapProxyProtocol：支持向后端发送 Proxy Protocol v1/v2 头。
+	CapProxyProtocol = "proxy_protocol"
+	// CapUDPSpoof：支持 UDP 源 IP 伪装拨号。
+	CapUDPSpoof = "udp_spoof"
+	// CapPortRange：支持端口段规则（RemotePortEnd/LocalPort 偏移映射）。
+	CapPortRange = "port_range"
+)
+
+// HasCapability 报告能力列表中是否包含 c。
+func HasCapability(caps []string, c string) bool {
+	for _, x := range caps {
+		if x == c {
+			return true
+		}
+	}
+	return false
 }
 
 // PortBinding 描述 Server 监听（TCP、UDP 或两者）并转发给 Client 的一个端口。

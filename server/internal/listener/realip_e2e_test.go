@@ -72,6 +72,7 @@ func TestRealIPPropagatedToMetadataAndHeaders(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sess := session.New("s", "c1", srvYm, logger, nil)
+	sess.Capabilities = []string{protocol.CapDialAck}
 	m := NewManager("127.0.0.1", logger, func(id string) *session.Session { return sess })
 	route := httpRoute{RuleID: 7, ClientID: "c1", PathPrefix: "/",
 		IPSources: []string{"cf-connecting-ip", "x-forwarded-for"}, TrustedProxies: mustNets(t, "127.0.0.0/8")}

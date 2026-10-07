@@ -66,6 +66,7 @@ func setupHTTPProxy(t *testing.T, backendAddr string, offline string, clientOnli
 	go fakeClient(t, cliYm, backendAddr)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sess := session.New("s", "c1", srvYm, logger, nil)
+	sess.Capabilities = []string{protocol.CapDialAck}
 	m := NewManager("127.0.0.1", logger, func(id string) *session.Session {
 		if clientOnline && id == "c1" {
 			return sess

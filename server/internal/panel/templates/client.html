@@ -45,6 +45,7 @@
 
   {{if .Error}}<div class="alert alert-err">{{.Error}}</div>{{end}}
   {{if .Notice}}<div class="alert alert-ok">{{.Notice}}</div>{{end}}
+  {{if .Outdated}}<div class="alert alert-err">这台机器的 Client 版本过旧（{{if .ClientVersion}}{{.ClientVersion}}{{else}}未知版本{{end}}），不支持 HTTP 规则所需的拨号确认，HTTP 规则将直接返回“服务不可用”页面。请在该机器上执行 <code>opennofrp-client update</code> 升级。</div>{{end}}
 
   <section class="card">
     <h2>转发规则</h2>

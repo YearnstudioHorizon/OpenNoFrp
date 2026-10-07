@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"opennofrp/pkg/protocol"
 	"opennofrp/server/internal/session"
 )
 
@@ -199,6 +200,13 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		sess := m.Lookup(route.ClientID)
 		if sess == nil {
 			m.Logger.Warn("http request for offline client", "rule_id", route.RuleID, "host", r.Host)
+			serveUnavailable(w, route)
+			return
+		}
+		if !sess.HasCapability(protocol.CapDialAck) {
+			// 旧版 Client 不会回写拨号确认，等待只会超时；直接返回不可用页面。
+			m.Logger.Warn("http request for outdated client without dial_ack, upgrade the client",
+				"rule_id", route.RuleID, "client_id", route.ClientID, "client_version", sess.ClientVersion)
 			serveUnavailable(w, route)
 			return
 		}

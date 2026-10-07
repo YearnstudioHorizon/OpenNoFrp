@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"opennofrp/pkg/protocol"
 	"opennofrp/pkg/updater"
 	"opennofrp/pkg/version"
 	"opennofrp/server/internal/listener"
@@ -57,6 +58,9 @@ type Panel struct {
 	Fingerprint string
 	// ClientBinDir 用于提供 /dl/opennofrp-client-<os>-<arch> 下载
 	ClientBinDir string
+	// ClientStatus 返回某个 Client 当前是否有活跃会话、其上报的版本与能力列表。
+	// 由 Server 核心在构造后注入；为 nil 时面板回退为基于 LastSeen 的判断。
+	ClientStatus func(clientID string) (online bool, version string, caps []string)
 
 	tmpl *template.Template
 
@@ -278,7 +282,7 @@ func (p *Panel) indexData(r *http.Request) map[string]any {
 	onlineCount, totalRules := 0, 0
 	for _, c := range clients {
 		rules, _ := p.Store.ListRulesForClient(r.Context(), c.ID)
-		online := !c.LastSeenAt.IsZero() && time.Since(c.LastSeenAt) < 2*time.Minute
+		online, _, _ := p.clientStatus(c)
 		lastSeen := "从未连接"
 		if !c.LastSeenAt.IsZero() {
 			lastSeen = c.LastSeenAt.Format("2006-01-02 15:04")
@@ -352,7 +356,17 @@ func (p *Panel) handleClientPage(w http.ResponseWriter, r *http.Request) {
 	if !c.LastSeenAt.IsZero() {
 		lastSeen = c.LastSeenAt.Format("2006-01-02 15:04")
 	}
-	online := !c.LastSeenAt.IsZero() && time.Since(c.LastSeenAt) < 2*time.Minute
+	online, clientVersion, caps := p.clientStatus(c)
+	// 有 HTTP 规则且 Client 在线但不支持 dial_ack 时，在页面上提示升级。
+	outdated := false
+	if online && !protocol.HasCapability(caps, protocol.CapDialAck) {
+		for _, ru := range rules {
+			if ru.Protocol == "http" {
+				outdated = true
+				break
+			}
+		}
+	}
 
 	// ?edit=<ruleID> 时在页面中预填编辑表单。
 	var editRule *store.Rule
@@ -366,11 +380,13 @@ func (p *Panel) handleClientPage(w http.ResponseWriter, r *http.Request) {
 		"Client": struct {
 			ID, Name, LastSeen string
 		}{ID: c.ID, Name: c.Name, LastSeen: lastSeen},
-		"Online":   online,
-		"Rules":    rules,
-		"EditRule": editRule,
-		"Error":    friendlyMsg(r.URL.Query().Get("err")),
-		"Notice":   friendlyMsg(r.URL.Query().Get("ok")),
+		"Online":        online,
+		"ClientVersion": clientVersion,
+		"Outdated":      outdated,
+		"Rules":         rules,
+		"EditRule":      editRule,
+		"Error":         friendlyMsg(r.URL.Query().Get("err")),
+		"Notice":        friendlyMsg(r.URL.Query().Get("ok")),
 	})
 }
 
@@ -657,6 +673,15 @@ func (p *Panel) handleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- 辅助函数 -------------------------------------------------------------
+
+// clientStatus 返回 Client 的在线状态、版本与能力。优先使用 Server 核心注入的实时
+// 会话信息；未注入时回退为基于 LastSeen（2 分钟内）的判断。
+func (p *Panel) clientStatus(c store.Client) (bool, string, []string) {
+	if p.ClientStatus != nil {
+		return p.ClientStatus(c.ID)
+	}
+	return !c.LastSeenAt.IsZero() && time.Since(c.LastSeenAt) < 2*time.Minute, "", nil
+}
 
 func (p *Panel) rulesChanged() {
 	if p.OnRules != nil {

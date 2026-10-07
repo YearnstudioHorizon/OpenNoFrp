@@ -28,6 +28,13 @@ import (
 // 决定是否伪造源 IP）并中继字节数据。
 type StreamHandler func(ctx context.Context, meta protocol.StreamMetadata, stream net.Conn)
 
+// ClientCapabilities 是本版本 Client 在握手时上报给 Server 的可选能力列表。
+// 每实现一项新能力（SNI 提示、Proxy Protocol、UDP 伪装、端口段等）就在此追加
+// 对应的 protocol.Cap* 常量。
+var ClientCapabilities = []string{
+	protocol.CapDialAck,
+}
+
 // Client 管理到一个 OpenNoFrp Server 的一条逻辑连接，包括自动重连。
 type Client struct {
 	Cfg    *config.Config
@@ -209,6 +216,7 @@ func (c *Client) handshakeOrRegister(conn net.Conn) error {
 		ClientID:        creds.ClientID,
 		ClientSecret:    creds.ClientSecret,
 		ClientVersion:   version.Version,
+		Capabilities:    ClientCapabilities,
 	}
 	if err := protocol.WriteJSONMessage(conn, req); err != nil {
 		return fmt.Errorf("controlconn: send handshake: %w", err)

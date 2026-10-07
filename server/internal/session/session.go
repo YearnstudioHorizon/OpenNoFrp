@@ -23,9 +23,18 @@ type Session struct {
 	Yamux    *yamux.Session
 	Logger   *slog.Logger
 
+	// ClientVersion / Capabilities 来自握手请求；旧版 Client 的 Capabilities 为空。
+	ClientVersion string
+	Capabilities  []string
+
 	mu           sync.Mutex
 	lastActivity time.Time
 	ctrlStream   net.Conn // 双向控制流：上行心跳，下行快照及确认
+}
+
+// HasCapability 报告该会话的 Client 是否在握手时声明了能力 c。
+func (s *Session) HasCapability(c string) bool {
+	return protocol.HasCapability(s.Capabilities, c)
 }
 
 func New(id, clientID string, ym *yamux.Session, logger *slog.Logger, ctrlStream net.Conn) *Session {
