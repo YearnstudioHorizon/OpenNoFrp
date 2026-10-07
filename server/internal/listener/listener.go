@@ -69,6 +69,8 @@ type Manager struct {
 	tcp  map[uint16]*tcpListener
 	udp  map[uint16]*udpListener
 	http map[uint16]*httpListener
+	// tlsPass 是 TLS 透传（SNI 路由）监听器，见 sni.go。
+	tlsPass map[uint16]*tlsPassListener
 
 	// tlsst 保存 ACME 管理器、ACME 允许域名与 HTTPS 跳转表（见 tls.go）。
 	tlsst tlsState
@@ -103,6 +105,7 @@ func NewManager(bindAddr string, logger *slog.Logger, lookup SessionLookup) *Man
 		tcp:      make(map[uint16]*tcpListener),
 		udp:      make(map[uint16]*udpListener),
 		http:     make(map[uint16]*httpListener),
+		tlsPass:  make(map[uint16]*tlsPassListener),
 	}
 }
 
@@ -139,6 +142,9 @@ func (m *Manager) openTCP(r ruleView) error {
 	}
 	if _, ok := m.http[r.Port]; ok {
 		return fmt.Errorf("listener: tcp port %d already open as an http listener", r.Port)
+	}
+	if _, ok := m.tlsPass[r.Port]; ok {
+		return fmt.Errorf("listener: tcp port %d already open as a tls passthrough listener", r.Port)
 	}
 	addr := fmt.Sprintf("%s:%d", m.BindAddr, r.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -358,10 +364,14 @@ func (m *Manager) OpenPorts() map[string]uint32 {
 // 端口重新创建）。
 func (m *Manager) Reconcile(desired []RuleView) {
 	want := make(map[string]RuleView)
-	var httpRules []RuleView
+	var httpRules, tlsRules []RuleView
 	for _, r := range desired {
 		if r.Protocol == "http" {
 			httpRules = append(httpRules, r)
+			continue
+		}
+		if r.Protocol == "tls" {
+			tlsRules = append(tlsRules, r)
 			continue
 		}
 		// 双栈规则会变成两个条目：tcp:port 和 udp:port
@@ -382,6 +392,7 @@ func (m *Manager) Reconcile(desired []RuleView) {
 	// 先关闭不再需要的 HTTP 端口并更新路由，再打开 TCP/UDP 端口，
 	// 使 http -> tcp 的协议切换能释放端口。
 	m.reconcileHTTP(httpRules)
+	m.reconcileTLSPass(tlsRules)
 	for key, r := range want {
 		if existingID, ok := have[key]; !ok || existingID != r.ID {
 			if err := m.OpenRule(r); err != nil {

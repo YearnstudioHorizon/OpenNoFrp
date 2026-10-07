@@ -33,6 +33,7 @@ type StreamHandler func(ctx context.Context, meta protocol.StreamMetadata, strea
 // 对应的 protocol.Cap* 常量。
 var ClientCapabilities = []string{
 	protocol.CapDialAck,
+	protocol.CapSNIHint,
 }
 
 // Client 管理到一个 OpenNoFrp Server 的一条逻辑连接，包括自动重连。

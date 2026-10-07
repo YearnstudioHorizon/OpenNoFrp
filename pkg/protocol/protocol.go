@@ -72,6 +72,42 @@ type StreamMetadata struct {
 	RuleID     uint32
 	// Flags 是位标志（byte 25）。旧版 Client 会忽略该字节。
 	Flags uint8
+	// SNI 是 TLS 透传规则中访问者 ClientHello 携带的服务器名（SNI 提示），
+	// 编码在尾部变长区段中（TLV：type=TrailerSNI, uint16 长度, 值）。旧版 Client
+	// 会读出并丢弃尾部区段，因此保持向后兼容。
+	SNI string
+}
+
+// 尾部区段 TLV 类型。
+const (
+	TrailerSNI byte = 1
+)
+
+// encodeTrailer 将可选扩展字段编码为尾部区段。
+func (m StreamMetadata) encodeTrailer() []byte {
+	var out []byte
+	if m.SNI != "" && len(m.SNI) <= 255 {
+		out = append(out, TrailerSNI, 0, byte(len(m.SNI)))
+		out = append(out, m.SNI...)
+	}
+	return out
+}
+
+// decodeTrailer 解析尾部区段中已知的 TLV，忽略未知类型。
+func (m *StreamMetadata) decodeTrailer(b []byte) {
+	for len(b) >= 3 {
+		t := b[0]
+		n := int(binary.BigEndian.Uint16(b[1:3]))
+		b = b[3:]
+		if n > len(b) {
+			return
+		}
+		switch t {
+		case TrailerSNI:
+			m.SNI = string(b[:n])
+		}
+		b = b[n:]
+	}
 }
 
 // FlagDialAck 要求 Client 在拨号本地服务之后、转发任何负载之前，先在流上回写
@@ -111,8 +147,10 @@ func (m StreamMetadata) Encode() ([]byte, error) {
 
 	binary.BigEndian.PutUint16(buf[19:21], m.ClientPort)
 	binary.BigEndian.PutUint32(buf[21:25], m.RuleID)
-	buf[25] = m.Flags                         // flags
-	binary.BigEndian.PutUint16(buf[26:28], 0) // 暂无尾部区段
+	buf[25] = m.Flags // flags
+	trailer := m.encodeTrailer()
+	binary.BigEndian.PutUint16(buf[26:28], uint16(len(trailer)))
+	buf = append(buf, trailer...)
 
 	return buf, nil
 }
@@ -167,11 +205,12 @@ func ReadStreamMetadata(r io.Reader) (StreamMetadata, error) {
 
 	trailingLen := binary.BigEndian.Uint16(header[26:28])
 	if trailingLen > 0 {
-		// 保留供将来使用；读出并丢弃，使尚不理解该扩展的 Client 仍能保持
-		// 流的对齐。
-		if _, err := io.CopyN(io.Discard, r, int64(trailingLen)); err != nil {
-			return m, fmt.Errorf("protocol: discard trailing section: %w", err)
+		// 读出完整尾部区段并解析已知 TLV（未知类型忽略），保持流的对齐。
+		trailer := make([]byte, trailingLen)
+		if _, err := io.ReadFull(r, trailer); err != nil {
+			return m, fmt.Errorf("protocol: read trailing section: %w", err)
 		}
+		m.decodeTrailer(trailer)
 	}
 
 	return m, nil

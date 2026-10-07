@@ -231,7 +231,7 @@ func friendlyMsg(s string) string {
 	case "invalid credentials":
 		return "用户名或密码错误"
 	case "bad protocol":
-		return "协议无效，仅支持 HTTP、TCP、UDP 或 TCP+UDP 双栈"
+		return "协议无效，仅支持 HTTP、TLS 透传、TCP、UDP 或 TCP+UDP 双栈"
 	case "bad port":
 		return "端口无效，请填写 1–65535 之间的数字"
 	case "bad local ip":
@@ -269,7 +269,7 @@ func friendlyMsg(s string) string {
 		return fmt.Sprintf("域名 %s 无效，请填写如 example.com 或 *.example.com 的域名", strings.TrimPrefix(s, "bad domain "))
 	}
 	if strings.HasPrefix(s, "http route conflicts with rule ") {
-		return fmt.Sprintf("该端口上已有规则 #%s 使用了相同的域名 + 路径前缀", strings.TrimPrefix(s, "http route conflicts with rule "))
+		return fmt.Sprintf("该端口上已有规则 #%s 使用了相同的域名（+ 路径前缀），或 HTTP/HTTPS 设置不一致", strings.TrimPrefix(s, "http route conflicts with rule "))
 	}
 	if strings.HasPrefix(s, "remote_port ") {
 		if i := strings.Index(s, " is reserved ("); i > 0 && strings.HasSuffix(s, ")") {
@@ -413,7 +413,7 @@ const maxOfflinePageBytes = 64 * 1024
 // ?err= 参数，由 friendlyMsg 翻译。
 func (p *Panel) parseRuleForm(r *http.Request, clientID string, excludeID int64) (store.Rule, string) {
 	protocol := r.FormValue("protocol")
-	if protocol != "tcp" && protocol != "udp" && protocol != "tcp+udp" && protocol != "http" {
+	if protocol != "tcp" && protocol != "udp" && protocol != "tcp+udp" && protocol != "http" && protocol != "tls" {
 		return store.Rule{}, "bad protocol"
 	}
 	localPort, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("local_port")))
@@ -524,12 +524,22 @@ func (p *Panel) parseRuleForm(r *http.Request, clientID string, excludeID int64)
 			rule.RedirectHTTPS = "1"
 		}
 	}
+	if protocol == "tls" {
+		// TLS 透传：只按 SNI 域名路由，不解密，证书由内网后端持有。
+		domains := store.SplitDomains(r.FormValue("domains"))
+		for _, d := range domains {
+			if len(d) > 253 || !validDomainRegex.MatchString(d) {
+				return store.Rule{}, "bad domain " + d
+			}
+		}
+		rule.Domains = strings.Join(domains, ",")
+	}
 	conflict, err := p.Store.RuleConflict(r.Context(), rule)
 	if err != nil {
 		return store.Rule{}, err.Error()
 	}
 	if conflict != nil {
-		if protocol == "http" && conflict.Protocol == "http" {
+		if (protocol == "http" && conflict.Protocol == "http") || (protocol == "tls" && conflict.Protocol == "tls") {
 			return store.Rule{}, fmt.Sprintf("http route conflicts with rule %d", conflict.ID)
 		}
 		return store.Rule{}, fmt.Sprintf("remote_port %d already used", remotePort)

@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS rules (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
-	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp','tcp+udp','http')),
+	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp','tcp+udp','http','tls')),
 	local_ip TEXT NOT NULL DEFAULT '127.0.0.1',
 	local_port INTEGER NOT NULL,
 	remote_port INTEGER NOT NULL,
@@ -111,11 +111,12 @@ CREATE TABLE IF NOT EXISTS reserved_ports (
 	if err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
-	if err := s.migrateRulesDualStack(); err != nil {
-		return fmt.Errorf("store: migrate rules dual-stack: %w", err)
-	}
+	// 先补齐缺失的列，再按需重建表（重建时会复制全部列）。
 	if err := s.ensureRuleColumns(); err != nil {
 		return fmt.Errorf("store: migrate rules columns: %w", err)
+	}
+	if err := s.migrateRulesDualStack(); err != nil {
+		return fmt.Errorf("store: migrate rules dual-stack: %w", err)
 	}
 	return nil
 }
@@ -134,7 +135,7 @@ func (s *Store) migrateRulesDualStack() error {
 	if err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rules'`).Scan(&ddl); err != nil {
 		return err
 	}
-	if strings.Contains(ddl, "'http'") {
+	if strings.Contains(ddl, "'tls'") {
 		return nil
 	}
 	tx, err := s.db.Begin()
@@ -147,7 +148,7 @@ CREATE TABLE rules_new (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
-	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp','tcp+udp','http')),
+	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp','tcp+udp','http','tls')),
 	local_ip TEXT NOT NULL DEFAULT '127.0.0.1',
 	local_port INTEGER NOT NULL,
 	remote_port INTEGER NOT NULL,
@@ -164,8 +165,10 @@ CREATE TABLE rules_new (
 	tls_key TEXT NOT NULL DEFAULT '',
 	redirect_https TEXT NOT NULL DEFAULT ''
 );
-INSERT INTO rules_new (id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at)
-	SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at FROM rules;
+INSERT INTO rules_new (id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at,
+	domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https)
+	SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at,
+	domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https FROM rules;
 DROP TABLE rules;
 ALTER TABLE rules_new RENAME TO rules;
 `
@@ -711,10 +714,34 @@ func (s *Store) RuleConflict(ctx context.Context, c Rule) (*Rule, error) {
 	return nil, nil
 }
 
-func usesTCP(proto string) bool { return proto == "tcp" || proto == "tcp+udp" || proto == "http" }
+func usesTCP(proto string) bool {
+	return proto == "tcp" || proto == "tcp+udp" || proto == "http" || proto == "tls"
+}
 func usesUDP(proto string) bool { return proto == "udp" || proto == "tcp+udp" }
 
+// domainsOverlap 报告两组域名是否重叠：两者都为空（都是兜底）或有相同域名。
+func domainsOverlap(a, b string) bool {
+	da, db := SplitDomains(a), SplitDomains(b)
+	if len(da) == 0 || len(db) == 0 {
+		return len(da) == 0 && len(db) == 0
+	}
+	set := make(map[string]bool, len(da))
+	for _, d := range da {
+		set[d] = true
+	}
+	for _, d := range db {
+		if set[d] {
+			return true
+		}
+	}
+	return false
+}
+
 func rulesConflict(a, b Rule) bool {
+	// TLS 透传规则之间可按 SNI 域名共享端口；与其它 TCP 类规则（含 HTTP）不能共用端口。
+	if a.Protocol == "tls" && b.Protocol == "tls" {
+		return domainsOverlap(a.Domains, b.Domains)
+	}
 	if a.Protocol == "http" && b.Protocol == "http" {
 		// 同一端口要么全部是 HTTPS（终止 TLS），要么全部是明文 HTTP。
 		if (a.TLSMode != "") != (b.TLSMode != "") {

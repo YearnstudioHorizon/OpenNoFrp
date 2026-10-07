@@ -126,6 +126,11 @@ const (
 	// WebSocket 升级与 SSE 流式响应。对 Client 而言，每个 HTTP 请求连接仍以
 	// TransportTCP 流的形式到达，按普通 TCP 规则拨号本地服务即可。
 	RuleProtocolHTTP RuleProtocol = "http"
+	// RuleProtocolTLS 是 TLS 透传规则：Server 只窥探访问者 ClientHello 中的 SNI，
+	// 按域名路由到对应规则（多条 TLS 规则可共享同一端口），不解密流量；证书由
+	// 内网后端自己持有。对 Client 而言仍是 TransportTCP 流（带 FlagDialAck 与
+	// SNI 提示），按普通 TCP 规则拨号本地服务即可。
+	RuleProtocolTLS RuleProtocol = "tls"
 )
 
 // Rule 是由 Server 推送给 Client 的一条转发规则。它是由 Server 掌控的、关于

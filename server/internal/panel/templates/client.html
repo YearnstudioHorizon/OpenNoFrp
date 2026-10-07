@@ -60,10 +60,11 @@
           <tr class="{{if not .Enabled}}disabled{{end}}">
             <td>{{.ID}}</td>
             <td>{{.Name}}</td>
-            <td>{{if eq .Protocol "http"}}<span class="badge badge-green">HTTP</span>{{else if eq .Protocol "tcp+udp"}}<span class="badge badge-blue">TCP</span> <span class="badge badge-purple">UDP</span>{{else if eq .Protocol "udp"}}<span class="badge badge-purple">UDP</span>{{else}}<span class="badge badge-blue">TCP</span>{{end}}</td>
+            <td>{{if eq .Protocol "http"}}<span class="badge badge-green">HTTP</span>{{else if eq .Protocol "tls"}}<span class="badge badge-amber">TLS</span>{{else if eq .Protocol "tcp+udp"}}<span class="badge badge-blue">TCP</span> <span class="badge badge-purple">UDP</span>{{else if eq .Protocol "udp"}}<span class="badge badge-purple">UDP</span>{{else}}<span class="badge badge-blue">TCP</span>{{end}}</td>
             <td class="mono" style="font-size:13px">{{.LocalIP}}:{{.LocalPort}}</td>
             <td>
               <span class="port">:{{.RemotePort}}</span>
+              {{if eq .Protocol "tls"}}<div class="route-info mono">SNI：{{if .Domains}}{{.Domains}}{{else}}任意域名{{end}}</div>{{end}}
               {{if eq .Protocol "http"}}
                 <div class="route-info mono">{{if .Domains}}{{.Domains}}{{else}}任意域名{{end}}{{if .PathPrefix}}{{.PathPrefix}}{{else}}/{{end}}</div>
                 {{if .OfflinePage}}<div class="route-info">自定义不可用页面</div>{{end}}
@@ -112,6 +113,10 @@
           <span class="proto-card"><b>HTTP</b><small>网站 / API，支持 WebSocket、SSE；多个服务可按域名共享一个端口</small></span>
         </label>
         <label class="proto-opt">
+          <input type="radio" name="protocol" value="tls" {{if $e}}{{if eq $e.Protocol "tls"}}checked{{end}}{{end}}>
+          <span class="proto-card"><b>TLS 透传</b><small>HTTPS / 任意 TLS 服务，按 SNI 域名共享端口，不解密，证书由内网服务持有</small></span>
+        </label>
+        <label class="proto-opt">
           <input type="radio" name="protocol" value="tcp" {{if $e}}{{if eq $e.Protocol "tcp"}}checked{{end}}{{end}}>
           <span class="proto-card"><b>TCP</b><small>SSH / 数据库 / 游戏等任意 TCP 服务，独占端口</small></span>
         </label>
@@ -146,10 +151,11 @@
             <label for="f-rport">公网端口（服务器上）</label>
             <input id="f-rport" name="remote_port" value="{{if $e}}{{$e.RemotePort}}{{else}}8080{{end}}" inputmode="numeric" required {{if $e}}data-touched="1"{{end}}>
             <span class="help" data-proto-show="http">HTTP 规则可与其他 HTTP 规则共用同一端口（如 80）</span>
+            <span class="help" data-proto-show="tls">TLS 透传规则可与其他 TLS 透传规则按 SNI 共用同一端口（如 443）</span>
             <span class="help" data-proto-show="tcp udp tcp+udp">服务器对外开放的端口，1–65535，由该规则独占</span>
           </div>
 
-          <div class="field span-all" data-proto-show="http">
+          <div class="field span-all" data-proto-show="http tls">
             <label for="f-domains">绑定域名</label>
             <input id="f-domains" name="domains" placeholder="例如：app.example.com, *.example.com" value="{{if $e}}{{$e.Domains}}{{end}}">
             <span class="help">多个域名用逗号分隔，支持 *.example.com 通配；留空则匹配该端口上所有未被其他规则认领的域名（兜底）。域名需解析到本服务器。</span>
@@ -205,7 +211,7 @@
           </div>
 
           <div class="check-stack">
-            <label class="check" data-proto-show="http tcp tcp+udp"><input type="checkbox" name="preserve_source_ip" value="1" {{if $e}}{{if $e.PreserveSourceIP}}checked{{end}}{{else}}checked{{end}}>保留来源 IP</label>
+            <label class="check" data-proto-show="http tls tcp tcp+udp"><input type="checkbox" name="preserve_source_ip" value="1" {{if $e}}{{if $e.PreserveSourceIP}}checked{{end}}{{else}}checked{{end}}>保留来源 IP</label>
             <label class="check"><input type="checkbox" name="enabled" value="1" {{if $e}}{{if $e.Enabled}}checked{{end}}{{else}}checked{{end}}>{{if $e}}启用{{else}}创建后立即启用{{end}}</label>
           </div>
         </div>
@@ -241,7 +247,7 @@
       el.querySelectorAll('input, textarea, select').forEach(function (i) { i.disabled = !show; });
     });
     if (proto && !rport.dataset.touched) {
-      rport.value = proto === 'http' ? '80' : '8080';
+      rport.value = proto === 'http' ? '80' : (proto === 'tls' ? '443' : '8080');
     }
   }
   form.querySelectorAll('input[name=protocol]').forEach(function (r) {

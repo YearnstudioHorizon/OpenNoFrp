@@ -146,6 +146,11 @@ func (s *Session) OpenUDPStream(remoteAddr *net.UDPAddr, ruleID uint32) (net.Con
 // 成功拨通本地服务，调用方可直接在返回的连接上写入 HTTP 请求；若本地服务不可用，
 // 返回 ErrBackendUnavailable，调用方据此展示“服务不可用”页面。
 func (s *Session) OpenHTTPStream(clientIP net.IP, clientPort uint16, ruleID uint32, timeout time.Duration) (net.Conn, error) {
+	return s.OpenAckStream(clientIP, clientPort, ruleID, "", timeout)
+}
+
+// OpenAckStream 与 OpenHTTPStream 相同，但可在尾部区段附带 SNI 提示（TLS 透传规则）。
+func (s *Session) OpenAckStream(clientIP net.IP, clientPort uint16, ruleID uint32, sni string, timeout time.Duration) (net.Conn, error) {
 	stream, err := s.Yamux.Open()
 	if err != nil {
 		return nil, fmt.Errorf("session: open yamux stream (http): %w", err)
@@ -159,6 +164,7 @@ func (s *Session) OpenHTTPStream(clientIP net.IP, clientPort uint16, ruleID uint
 		ClientPort: clientPort,
 		RuleID:     ruleID,
 		Flags:      protocol.FlagDialAck,
+		SNI:        sni,
 	}
 	if err := meta.WriteHeader(stream); err != nil {
 		stream.Close()
