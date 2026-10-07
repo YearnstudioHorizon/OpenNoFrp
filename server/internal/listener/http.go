@@ -189,7 +189,11 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 			if remote != nil {
 				ip, port = remote.IP, uint16(remote.Port)
 			}
-			return sess.OpenHTTPStream(ip, port, route.RuleID, httpDialAckTimeout)
+			c, err := sess.OpenHTTPStream(ip, port, route.RuleID, httpDialAckTimeout)
+			if err != nil {
+				return nil, err
+			}
+			return m.guardFor(route.RuleID).wrapConn(c), nil
 		},
 	}
 
@@ -264,6 +268,21 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		if !ipAllowed(realIP, route.IPAllow) {
 			m.Logger.Info("http request rejected by ip allowlist", "rule_id", route.RuleID, "ip", realIP)
 			serveForbidden(w)
+			return
+		}
+		// 规则级防护：黑白名单、单 IP 并发请求数与请求速率（见 protect.go）。
+		release, reason := m.guardFor(route.RuleID).admit(realIP)
+		switch reason {
+		case guardOK:
+			defer release()
+		case guardDenied:
+			m.Logger.Info("http request rejected by rule protection", "rule_id", route.RuleID, "ip", realIP, "reason", reason)
+			serveForbidden(w)
+			return
+		default:
+			m.Logger.Info("http request rejected by rule protection", "rule_id", route.RuleID, "ip", realIP, "reason", reason)
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "429 too many requests", http.StatusTooManyRequests)
 			return
 		}
 		if !checkBasicAuth(r, route.BasicAuth) {

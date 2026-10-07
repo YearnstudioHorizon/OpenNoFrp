@@ -244,6 +244,32 @@
             <span class="help">该公网端口上没有任何规则匹配请求的域名/路径时返回；同一端口多条规则都设置时取 ID 最小的一条。上限 64 KB。</span>
           </div>
 
+          <div class="field span-all">
+            <label for="f-gallow">访问白名单（IP / CIDR，可选）</label>
+            <input id="f-gallow" name="guard_allow" value="{{if $e}}{{$e.GuardAllow}}{{end}}" placeholder="例如：203.0.113.0/24, 198.51.100.7">
+            <span class="help">填写后只允许名单内的访问者连接（HTTP 规则基于提取出的真实 IP）。留空表示不限制。</span>
+          </div>
+          <div class="field span-all">
+            <label for="f-gdeny">访问黑名单（IP / CIDR，可选）</label>
+            <input id="f-gdeny" name="guard_deny" value="{{if $e}}{{$e.GuardDeny}}{{end}}" placeholder="例如：192.0.2.0/24">
+            <span class="help">名单内的访问者一律拒绝，优先于白名单。</span>
+          </div>
+          <div class="field">
+            <label for="f-maxconn">单 IP 并发连接上限</label>
+            <input id="f-maxconn" name="max_conns_per_ip" value="{{if $e}}{{if $e.MaxConnsPerIP}}{{$e.MaxConnsPerIP}}{{end}}{{end}}" placeholder="0 = 不限制" inputmode="numeric">
+            <span class="help">HTTP 规则按并发请求计，UDP 规则按并发流计</span>
+          </div>
+          <div class="field">
+            <label for="f-rate">单 IP 每分钟新建连接上限</label>
+            <input id="f-rate" name="conn_rate_per_min" value="{{if $e}}{{if $e.ConnRatePerMin}}{{$e.ConnRatePerMin}}{{end}}{{end}}" placeholder="0 = 不限制" inputmode="numeric">
+            <span class="help">HTTP 规则按请求计，超出返回 429</span>
+          </div>
+          <div class="field">
+            <label for="f-bw">规则带宽上限（KB/s）</label>
+            <input id="f-bw" name="bandwidth_kbps" value="{{if $e}}{{if $e.BandwidthKBps}}{{$e.BandwidthKBps}}{{end}}{{end}}" placeholder="0 = 不限制" inputmode="numeric">
+            <span class="help">该规则所有连接共享，上下行合计；UDP 超出部分直接丢弃</span>
+          </div>
+
           <div class="check-stack">
             <label class="check" data-proto-show="http tls tcp tcp+udp"><input type="checkbox" name="preserve_source_ip" value="1" {{if $e}}{{if $e.PreserveSourceIP}}checked{{end}}{{else}}checked{{end}}>保留来源 IP</label>
             <label class="check"><input type="checkbox" name="enabled" value="1" {{if $e}}{{if $e.Enabled}}checked{{end}}{{else}}checked{{end}}>{{if $e}}启用{{else}}创建后立即启用{{end}}</label>

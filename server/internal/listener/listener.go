@@ -53,6 +53,9 @@ type RuleView struct {
 	IPAllow []*net.IPNet
 	// NotFoundPage 是该端口无匹配路由时返回的自定义 404 HTML。
 	NotFoundPage string
+
+	// Guard 是规则级防护配置（所有协议通用，见 protect.go）。
+	Guard GuardConfig
 }
 
 // expandRule 将一条双栈（"tcp+udp"）规则拆分为一个 TCP 视图和一个 UDP
@@ -88,6 +91,10 @@ type Manager struct {
 
 	// tlsst 保存 ACME 管理器、ACME 允许域名与 HTTPS 跳转表（见 tls.go）。
 	tlsst tlsState
+
+	// guards 是按规则 ID 保存的防护器（见 protect.go），由 guardMu 保护。
+	guardMu sync.Mutex
+	guards  map[uint32]*ruleGuard
 }
 
 type tcpListener struct {
@@ -106,9 +113,11 @@ type udpListener struct {
 }
 
 type udpFlow struct {
-	remote *net.UDPAddr
-	stream net.Conn
-	act    chan struct{} // 接收来自解复用循环的客户端数据报
+	remote  *net.UDPAddr
+	stream  net.Conn
+	act     chan struct{} // 接收来自解复用循环的客户端数据报
+	release func()        // 释放规则防护的并发流计数（见 protect.go）
+	guard   *ruleGuard
 }
 
 func NewManager(bindAddr string, logger *slog.Logger, lookup SessionLookup) *Manager {
@@ -120,6 +129,7 @@ func NewManager(bindAddr string, logger *slog.Logger, lookup SessionLookup) *Man
 		udp:      make(map[uint16]*udpListener),
 		http:     make(map[uint16]*httpListener),
 		tlsPass:  make(map[uint16]*tlsPassListener),
+		guards:   make(map[uint32]*ruleGuard),
 	}
 }
 
@@ -184,13 +194,26 @@ func (m *Manager) tcpAcceptLoop(_ string, tl *tcpListener) {
 			m.Logger.Error("tcp accept failed, closing listener", "rule_id", tl.ruleID, "error", err)
 			return
 		}
+		g := m.guardFor(tl.ruleID)
+		var ip net.IP
+		if ta, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+			ip = ta.IP
+		}
+		release, reason := g.admit(ip)
+		if reason != guardOK {
+			m.Logger.Info("public TCP connection rejected by rule protection", "rule_id", tl.ruleID, "remote", conn.RemoteAddr(), "reason", reason)
+			conn.Close()
+			continue
+		}
 		sess := m.Lookup(tl.clientID)
 		if sess == nil {
 			m.Logger.Warn("public TCP connection arrived but owning client is offline, dropping",
 				"rule_id", tl.ruleID, "remote", conn.RemoteAddr())
+			release()
 			conn.Close()
 			continue
 		}
+		conn = g.wrapConn(&releaseConn{Conn: conn, release: release})
 		if err := sess.OpenStreamFor(conn, tl.ruleID); err != nil {
 			m.Logger.Error("failed to forward connection to client", "rule_id", tl.ruleID, "error", err)
 			conn.Close()
@@ -241,22 +264,33 @@ func (m *Manager) udpLoop(ul *udpListener) {
 		flow, ok := ul.flows[key]
 		m.mu.Unlock()
 		if !ok {
+			g := m.guardFor(ul.ruleID)
+			release, reason := g.admit(remote.IP)
+			if reason != guardOK {
+				m.Logger.Debug("udp flow rejected by rule protection", "rule_id", ul.ruleID, "remote", key, "reason", reason)
+				continue
+			}
 			sess := m.Lookup(ul.clientID)
 			if sess == nil {
+				release()
 				m.Logger.Warn("udp datagram for offline client, dropping", "rule_id", ul.ruleID, "remote", key)
 				continue
 			}
 			stream, err := sess.OpenUDPStream(remote, ul.ruleID)
 			if err != nil {
+				release()
 				m.Logger.Error("failed to open udp stream", "rule_id", ul.ruleID, "error", err)
 				continue
 			}
-			flow = &udpFlow{remote: remote, stream: stream, act: make(chan struct{}, 64)}
+			flow = &udpFlow{remote: remote, stream: stream, act: make(chan struct{}, 64), release: release, guard: g}
 			m.mu.Lock()
 			ul.flows[key] = flow
 			m.mu.Unlock()
 			go m.udpFlowTX(ul, flow) // UDP 套接字 -> stream
 			go m.udpFlowRX(ul, flow) // stream -> UDP 套接字
+		}
+		if !flow.guard.allowBandwidth(n) {
+			continue // 超出规则带宽上限，丢弃该数据报
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
@@ -305,6 +339,9 @@ func (m *Manager) udpFlowRX(ul *udpListener, flow *udpFlow) {
 			m.reapFlow(ul, flow.remote.String())
 			return
 		}
+		if !flow.guard.allowBandwidth(len(payload)) {
+			continue
+		}
 		if _, err := ul.conn.WriteToUDP(payload, flow.remote); err != nil {
 			m.reapFlow(ul, flow.remote.String())
 			return
@@ -321,6 +358,9 @@ func (m *Manager) reapFlow(ul *udpListener, key string) {
 	m.mu.Unlock()
 	if ok {
 		flow.stream.Close()
+		if flow.release != nil {
+			flow.release()
+		}
 	}
 }
 
@@ -355,6 +395,9 @@ func (m *Manager) reapFlowLocked(ul *udpListener, key string) {
 	if ok {
 		delete(ul.flows, key)
 		flow.stream.Close()
+		if flow.release != nil {
+			flow.release()
+		}
 	}
 }
 
@@ -377,6 +420,7 @@ func (m *Manager) OpenPorts() map[string]uint32 {
 // 关闭不再需要的端口，并重启所属规则 ID 已变化的端口（规则被删除后以相同
 // 端口重新创建）。
 func (m *Manager) Reconcile(desired []RuleView) {
+	m.setGuards(desired)
 	want := make(map[string]RuleView)
 	var httpRules, tlsRules []RuleView
 	for _, r := range desired {

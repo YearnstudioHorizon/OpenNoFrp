@@ -316,6 +316,12 @@ func (s *server) reconcileListeners(ctx context.Context) {
 			v.Name = r.Name
 			v.Domains = store.SplitDomains(r.Domains)
 		}
+		// 规则级防护（所有协议通用）。
+		v.Guard.Allow, _ = listener.ParseTrustedProxies(r.GuardAllow)
+		v.Guard.Deny, _ = listener.ParseTrustedProxies(r.GuardDeny)
+		v.Guard.MaxConnsPerIP = r.MaxConnsPerIP
+		v.Guard.ConnRatePerMin = r.ConnRatePerMin
+		v.Guard.BandwidthKBps = r.BandwidthKBps
 		desired = append(desired, v)
 	}
 	s.listener.Reconcile(desired)

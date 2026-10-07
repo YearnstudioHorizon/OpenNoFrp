@@ -325,6 +325,15 @@ func friendlyMsg(s string) string {
 	if strings.HasPrefix(s, "bad trusted proxy ") {
 		return fmt.Sprintf("可信代理 %s 无效，请填写 IP 或 CIDR（如 173.245.48.0/20）", strings.TrimPrefix(s, "bad trusted proxy "))
 	}
+	if strings.HasPrefix(s, "bad guard allow ") {
+		return fmt.Sprintf("访问白名单条目 %s 无效，请填写 IP 或 CIDR（如 192.168.0.0/16）", strings.TrimPrefix(s, "bad guard allow "))
+	}
+	if strings.HasPrefix(s, "bad guard deny ") {
+		return fmt.Sprintf("访问黑名单条目 %s 无效，请填写 IP 或 CIDR（如 203.0.113.0/24）", strings.TrimPrefix(s, "bad guard deny "))
+	}
+	if s == "bad guard limit" {
+		return "连接数 / 速率 / 带宽上限无效，请填写非负整数（留空或 0 表示不限制）"
+	}
 	if strings.HasPrefix(s, "bad ip allow ") {
 		return fmt.Sprintf("IP 白名单条目 %s 无效，请填写 IP 或 CIDR（如 192.168.0.0/16）", strings.TrimPrefix(s, "bad ip allow "))
 	}
@@ -669,6 +678,43 @@ func (p *Panel) parseRuleForm(r *http.Request, clientID string, excludeID int64)
 			}
 		}
 		rule.Domains = strings.Join(domains, ",")
+	}
+	// 规则级防护（所有协议通用）：黑白名单、单 IP 并发/速率上限、带宽上限。
+	splitCIDRs := func(s string) string {
+		return strings.Join(strings.FieldsFunc(s, func(c rune) bool {
+			return c == ',' || c == ' ' || c == ';' || c == '\n' || c == '\r' || c == '\t'
+		}), ",")
+	}
+	guardAllow := strings.TrimSpace(r.FormValue("guard_allow"))
+	if _, bad := listener.ParseTrustedProxies(guardAllow); len(bad) > 0 {
+		return store.Rule{}, "bad guard allow " + bad[0]
+	}
+	rule.GuardAllow = splitCIDRs(guardAllow)
+	guardDeny := strings.TrimSpace(r.FormValue("guard_deny"))
+	if _, bad := listener.ParseTrustedProxies(guardDeny); len(bad) > 0 {
+		return store.Rule{}, "bad guard deny " + bad[0]
+	}
+	rule.GuardDeny = splitCIDRs(guardDeny)
+	parseLimit := func(name string, max int) (int, bool) {
+		v := strings.TrimSpace(r.FormValue(name))
+		if v == "" {
+			return 0, true
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > max {
+			return 0, false
+		}
+		return n, true
+	}
+	var okLimit bool
+	if rule.MaxConnsPerIP, okLimit = parseLimit("max_conns_per_ip", 1000000); !okLimit {
+		return store.Rule{}, "bad guard limit"
+	}
+	if rule.ConnRatePerMin, okLimit = parseLimit("conn_rate_per_min", 1000000); !okLimit {
+		return store.Rule{}, "bad guard limit"
+	}
+	if rule.BandwidthKBps, okLimit = parseLimit("bandwidth_kbps", 10000000); !okLimit {
+		return store.Rule{}, "bad guard limit"
 	}
 	conflict, err := p.Store.RuleConflict(r.Context(), rule)
 	if err != nil {
