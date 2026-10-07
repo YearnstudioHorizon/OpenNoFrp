@@ -227,7 +227,7 @@ func friendlyMsg(s string) string {
 	case "invalid credentials":
 		return "用户名或密码错误"
 	case "bad protocol":
-		return "协议无效，仅支持 TCP 或 UDP"
+		return "协议无效，仅支持 TCP、UDP 或 TCP+UDP 双栈"
 	case "bad port":
 		return "端口无效，请填写 1–65535 之间的数字"
 	case "password too short":
@@ -349,7 +349,7 @@ func (p *Panel) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
 
 	protocol := r.FormValue("protocol")
-	if protocol != "tcp" && protocol != "udp" {
+	if protocol != "tcp" && protocol != "udp" && protocol != "tcp+udp" {
 		p.redirectErr(w, r, fmt.Sprintf("/clients/%s?err=bad+protocol", clientID))
 		return
 	}

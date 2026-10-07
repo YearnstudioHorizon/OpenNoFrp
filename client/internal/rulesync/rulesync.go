@@ -29,13 +29,13 @@ const sharedFWMark = tproxy.DefaultFWMark
 
 // Reconciler holds the latest snapshot and per-rule runtime state.
 type Reconciler struct {
-	Logger *slog.Logger
+	Logger   *slog.Logger
 	StateDir string
 
-	mu              sync.RWMutex
-	rules           map[uint32]protocol.Rule
-	preparedNetns   map[int]bool // container PID -> whether its netns got sysctls+route yet
-	hostSetupDone   bool
+	mu            sync.RWMutex
+	rules         map[uint32]protocol.Rule
+	preparedNetns map[int]bool // container PID -> whether its netns got sysctls+route yet
+	hostSetupDone bool
 }
 
 func New(logger *slog.Logger, stateDir string) *Reconciler {

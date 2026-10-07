@@ -15,11 +15,11 @@ import (
 // (e.g. a proxy rule was added or removed), ensuring we only ever remove
 // exactly what we added.
 type State struct {
-	IngressIface   string          `json:"ingress_iface"`
-	RouteTable     int             `json:"route_table"`
-	FWMark         uint32          `json:"fwmark"`
-	Rules          []RuleSpec      `json:"rules"`
-	SysctlSnapshot SysctlSnapshot  `json:"sysctl_snapshot"`
+	IngressIface   string         `json:"ingress_iface"`
+	RouteTable     int            `json:"route_table"`
+	FWMark         uint32         `json:"fwmark"`
+	Rules          []RuleSpec     `json:"rules"`
+	SysctlSnapshot SysctlSnapshot `json:"sysctl_snapshot"`
 }
 
 // Manager coordinates the TPROXY rule set, policy routing, and sysctls for

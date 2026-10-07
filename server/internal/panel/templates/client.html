@@ -59,7 +59,7 @@
           <tr class="{{if not .Enabled}}disabled{{end}}">
             <td>{{.ID}}</td>
             <td>{{.Name}}</td>
-            <td>{{if eq .Protocol "udp"}}<span class="badge badge-purple">UDP</span>{{else}}<span class="badge badge-blue">TCP</span>{{end}}</td>
+            <td>{{if eq .Protocol "tcp+udp"}}<span class="badge badge-blue">TCP</span> <span class="badge badge-purple">UDP</span>{{else if eq .Protocol "udp"}}<span class="badge badge-purple">UDP</span>{{else}}<span class="badge badge-blue">TCP</span>{{end}}</td>
             <td class="mono" style="font-size:13px">{{.LocalIP}}:{{.LocalPort}}</td>
             <td><span class="port">:{{.RemotePort}}</span></td>
             <td>{{if .PreserveSourceIP}}<span class="badge badge-amber">保留</span>{{else}}<span style="color:var(--text-faint)">不保留</span>{{end}}</td>
@@ -97,6 +97,7 @@
           <select id="f-proto" name="protocol">
             <option value="tcp">TCP（网页 / SSH / 数据库等）</option>
             <option value="udp">UDP</option>
+            <option value="tcp+udp">TCP+UDP 双栈（同一端口同时开启 TCP 和 UDP）</option>
           </select>
         </div>
         <div class="field">

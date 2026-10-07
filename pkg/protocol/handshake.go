@@ -100,6 +100,11 @@ type RuleProtocol string
 const (
 	RuleProtocolTCP RuleProtocol = "tcp"
 	RuleProtocolUDP RuleProtocol = "udp"
+	// RuleProtocolBoth is a dual-stack rule: the Server opens both a TCP and
+	// a UDP listener on the same public port. Individual streams still carry
+	// TransportTCP or TransportUDP in their metadata, so the Client needs no
+	// special handling for it.
+	RuleProtocolBoth RuleProtocol = "tcp+udp"
 )
 
 // Rule is one forwarding rule as pushed from Server to Client. This is the

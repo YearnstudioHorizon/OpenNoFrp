@@ -7,9 +7,11 @@
 package listener
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,8 +22,21 @@ import (
 type RuleView struct {
 	ID       uint32
 	ClientID string
-	Protocol string // "tcp" or "udp"
+	Protocol string // "tcp", "udp" or "tcp+udp" (dual stack)
 	Port     uint16
+}
+
+// expandRule splits a dual-stack ("tcp+udp") rule into one TCP and one UDP
+// view sharing the same rule ID and port. Single-protocol rules are
+// returned unchanged.
+func expandRule(r RuleView) []RuleView {
+	if r.Protocol == "tcp+udp" {
+		t, u := r, r
+		t.Protocol = "tcp"
+		u.Protocol = "udp"
+		return []RuleView{t, u}
+	}
+	return []RuleView{r}
 }
 
 // ruleView keeps the old unexported alias shape; use RuleView in new code.
@@ -36,24 +51,24 @@ type Manager struct {
 	Logger   *slog.Logger
 	Lookup   SessionLookup
 
-	mu   sync.Mutex
-	tcp  map[uint16]*tcpListener
-	udp  map[uint16]*udpListener
+	mu  sync.Mutex
+	tcp map[uint16]*tcpListener
+	udp map[uint16]*udpListener
 }
 
 type tcpListener struct {
-	ln      net.Listener
-	ruleID  uint32
+	ln       net.Listener
+	ruleID   uint32
 	clientID string
-	done    chan struct{}
+	done     chan struct{}
 }
 
 type udpListener struct {
-	conn  *net.UDPConn
-	ruleID uint32
+	conn     *net.UDPConn
+	ruleID   uint32
 	clientID string
-	done  chan struct{}
-	flows map[string]*udpFlow
+	done     chan struct{}
+	flows    map[string]*udpFlow
 }
 
 type udpFlow struct {
@@ -82,6 +97,14 @@ func (m *Manager) OpenRule(r ruleView) error {
 		return m.openTCP(r)
 	case "udp":
 		return m.openUDP(r)
+	case "tcp+udp":
+		var errs []error
+		for _, v := range expandRule(r) {
+			if err := m.OpenRule(v); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
 	default:
 		return fmt.Errorf("listener: unknown protocol %q", r.Protocol)
 	}
@@ -210,9 +233,10 @@ func (m *Manager) udpLoop(ul *udpListener) {
 
 // udpFlowTX: remote client datagrams were already framed into the stream by
 // udpLoop; this is stream<-socket direction... actually split cleanly:
-//   udpLoop reads socket, frames to stream (TX towards client)
-//   udpFlowRX reads frames from stream, writes them to the UDP socket
-//   udpFlowTX currently: watchdog for idle flow + cleanup on done
+//
+//	udpLoop reads socket, frames to stream (TX towards client)
+//	udpFlowRX reads frames from stream, writes them to the UDP socket
+//	udpFlowTX currently: watchdog for idle flow + cleanup on done
 func (m *Manager) udpFlowTX(ul *udpListener, flow *udpFlow) {
 	t := time.NewTimer(120 * time.Second)
 	defer t.Stop()
@@ -315,15 +339,18 @@ func (m *Manager) OpenPorts() map[string]uint32 {
 func (m *Manager) Reconcile(desired []RuleView) {
 	want := make(map[string]RuleView)
 	for _, r := range desired {
-		want[fmt.Sprintf("%s:%d", r.Protocol, r.Port)] = r
+		// dual-stack rules become two entries: tcp:port and udp:port
+		for _, v := range expandRule(r) {
+			want[fmt.Sprintf("%s:%d", v.Protocol, v.Port)] = v
+		}
 	}
 	have := m.OpenPorts()
 	for key, ruleID := range have {
 		w, ok := want[key]
 		if !ok || w.ID != ruleID {
-			protocol := key[:3]
+			protocol, portStr, _ := strings.Cut(key, ":")
 			var port int
-			fmt.Sscanf(key[4:], "%d", &port)
+			fmt.Sscanf(portStr, "%d", &port)
 			m.ClosePort(protocol, uint16(port))
 		}
 	}
@@ -340,7 +367,9 @@ func (m *Manager) Reconcile(desired []RuleView) {
 // not required from the caller because rule IDs map 1:1 at a moment in
 // time to one port+protocol row).
 func (m *Manager) CloseRule(ruleID uint32, protocol string, port uint16) {
-	m.ClosePort(protocol, port)
+	for _, v := range expandRule(RuleView{ID: ruleID, Protocol: protocol, Port: port}) {
+		m.ClosePort(v.Protocol, v.Port)
+	}
 }
 
 func writeUDPFrame(w net.Conn, payload []byte) bool {

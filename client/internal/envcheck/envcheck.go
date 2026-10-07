@@ -146,7 +146,7 @@ func checkKernelModule(name string, fatal bool) CheckResult {
 	// so the user isn't surprised.
 	return CheckResult{
 		Name: fmt.Sprintf("kernel module %s loaded", name), Severity: sev, Passed: false,
-		Detail: fmt.Sprintf("%s not found in /proc/modules (may be built-in, or may need modprobe)", name),
+		Detail:  fmt.Sprintf("%s not found in /proc/modules (may be built-in, or may need modprobe)", name),
 		FixHint: fmt.Sprintf("modprobe %s", name),
 	}
 }

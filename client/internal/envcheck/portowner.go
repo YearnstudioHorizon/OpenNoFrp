@@ -298,9 +298,9 @@ func processName(pid int) string {
 // Detection strategy:
 //  1. Parse the cgroup path for a Docker container ID. Cgroup v2 unified
 //     hierarchy paths look like:
-//       0::/system.slice/docker-<64-hex-id>.scope
+//     0::/system.slice/docker-<64-hex-id>.scope
 //     Cgroup v1 paths look like:
-//       .../docker/<64-hex-id>
+//     .../docker/<64-hex-id>
 //  2. If a container ID is found, compare /proc/<pid>/ns/net's target inode
 //     against /proc/1/ns/net (PID 1, which is always in the host's root
 //     network namespace on a non-containerized host, or at minimum is a

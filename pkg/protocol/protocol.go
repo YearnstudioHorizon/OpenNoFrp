@@ -104,7 +104,7 @@ func (m StreamMetadata) Encode() ([]byte, error) {
 
 	binary.BigEndian.PutUint16(buf[19:21], m.ClientPort)
 	binary.BigEndian.PutUint32(buf[21:25], m.RuleID)
-	buf[25] = 0                                // flags reserved
+	buf[25] = 0                               // flags reserved
 	binary.BigEndian.PutUint16(buf[26:28], 0) // no trailing section yet
 
 	return buf, nil

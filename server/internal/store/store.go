@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -90,7 +91,7 @@ CREATE TABLE IF NOT EXISTS rules (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
-	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp')),
+	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp','tcp+udp')),
 	local_ip TEXT NOT NULL DEFAULT '127.0.0.1',
 	local_port INTEGER NOT NULL,
 	remote_port INTEGER NOT NULL,
@@ -109,7 +110,53 @@ CREATE TABLE IF NOT EXISTS reserved_ports (
 	if err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
+	if err := s.migrateRulesDualStack(); err != nil {
+		return fmt.Errorf("store: migrate rules dual-stack: %w", err)
+	}
 	return nil
+}
+
+// migrateRulesDualStack rebuilds the rules table of databases created before
+// dual-stack ("tcp+udp") rules existed. SQLite cannot alter a CHECK
+// constraint in place, so the table is copied into a new one with the
+// widened constraint. Idempotent: does nothing once the constraint already
+// mentions 'tcp+udp'.
+func (s *Store) migrateRulesDualStack() error {
+	var ddl string
+	if err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rules'`).Scan(&ddl); err != nil {
+		return err
+	}
+	if strings.Contains(ddl, "tcp+udp") {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	const rebuild = `
+CREATE TABLE rules_new (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+	name TEXT NOT NULL,
+	protocol TEXT NOT NULL CHECK (protocol IN ('tcp','udp','tcp+udp')),
+	local_ip TEXT NOT NULL DEFAULT '127.0.0.1',
+	local_port INTEGER NOT NULL,
+	remote_port INTEGER NOT NULL,
+	preserve_source_ip INTEGER NOT NULL DEFAULT 1,
+	enabled INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	UNIQUE(remote_port)
+);
+INSERT INTO rules_new (id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at)
+	SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at FROM rules;
+DROP TABLE rules;
+ALTER TABLE rules_new RENAME TO rules;
+`
+	if _, err := tx.Exec(rebuild); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // --- Admin account -------------------------------------------------------
