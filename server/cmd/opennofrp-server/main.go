@@ -184,6 +184,8 @@ func runServer() {
 		}
 		return true, sess.ClientVersion, sess.Capabilities
 	}
+	p.RuleStats = s.listener.Stats
+	p.MetricsToken = cfg.Server.MetricsToken
 	panelAddr := fmt.Sprintf("%s:%d", cfg.Server.PanelAddr, cfg.Server.PanelPort)
 	httpSrv := &http.Server{Addr: panelAddr, Handler: p.Handler()}
 	go func() {

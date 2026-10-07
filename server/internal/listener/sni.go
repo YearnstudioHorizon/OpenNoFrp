@@ -147,23 +147,29 @@ func (m *Manager) handleTLSPassConn(tl *tlsPassListener, conn net.Conn) {
 	release, reason := g.admit(ip)
 	if reason != guardOK {
 		m.Logger.Info("tls passthrough: connection rejected by rule protection", "rule_id", route.RuleID, "remote", conn.RemoteAddr(), "reason", reason)
+		m.statRejected(route.RuleID)
 		conn.Close()
 		return
 	}
 	defer release()
-	conn = g.wrapConn(conn)
+	done := m.statOpened(route.RuleID)
+	defer done()
+	conn = g.wrapConn(m.countConn(route.RuleID, conn, false))
 	sess := m.Lookup(route.ClientID)
 	if sess == nil || !sess.HasCapability(protocol.CapDialAck) {
 		m.Logger.Warn("tls passthrough: client offline or outdated", "rule_id", route.RuleID, "sni", sni)
+		m.statBackendError(route.RuleID, "client offline or outdated")
 		conn.Close()
 		return
 	}
 	stream, err := sess.OpenAckStream(ip, port, route.RuleID, sni, httpDialAckTimeout)
 	if err != nil {
 		m.Logger.Warn("tls passthrough: backend unavailable", "rule_id", route.RuleID, "sni", sni, "error", err)
+		m.statBackendError(route.RuleID, err.Error())
 		conn.Close()
 		return
 	}
+	m.statBytes(route.RuleID, len(peeked), 0)
 	if _, err := stream.Write(peeked); err != nil {
 		stream.Close()
 		conn.Close()

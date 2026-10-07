@@ -193,7 +193,7 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 			if err != nil {
 				return nil, err
 			}
-			return m.guardFor(route.RuleID).wrapConn(c), nil
+			return m.guardFor(route.RuleID).wrapConn(m.countConn(route.RuleID, c, true)), nil
 		},
 	}
 
@@ -236,6 +236,7 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 				return // 访问者主动断开
 			}
 			m.Logger.Warn("http backend unavailable", "rule_id", route.RuleID, "host", r.Host, "path", r.URL.Path, "error", err)
+			m.statBackendError(route.RuleID, err.Error())
 			serveUnavailable(w, route)
 		},
 	}
@@ -275,12 +276,15 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		switch reason {
 		case guardOK:
 			defer release()
+			defer m.statOpened(route.RuleID)()
 		case guardDenied:
+			m.statRejected(route.RuleID)
 			m.Logger.Info("http request rejected by rule protection", "rule_id", route.RuleID, "ip", realIP, "reason", reason)
 			serveForbidden(w)
 			return
 		default:
 			m.Logger.Info("http request rejected by rule protection", "rule_id", route.RuleID, "ip", realIP, "reason", reason)
+			m.statRejected(route.RuleID)
 			w.Header().Set("Retry-After", "5")
 			http.Error(w, "429 too many requests", http.StatusTooManyRequests)
 			return
@@ -292,6 +296,7 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		sess := m.Lookup(route.ClientID)
 		if sess == nil {
 			m.Logger.Warn("http request for offline client", "rule_id", route.RuleID, "host", r.Host)
+			m.statBackendError(route.RuleID, "client offline")
 			serveUnavailable(w, route)
 			return
 		}

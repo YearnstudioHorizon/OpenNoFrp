@@ -95,6 +95,10 @@ type Manager struct {
 	// guards 是按规则 ID 保存的防护器（见 protect.go），由 guardMu 保护。
 	guardMu sync.Mutex
 	guards  map[uint32]*ruleGuard
+
+	// stats 是按规则 ID 保存的统计计数器（见 stats.go），由 statsMu 保护。
+	statsMu sync.Mutex
+	stats   map[uint32]*ruleCounters
 }
 
 type tcpListener struct {
@@ -130,6 +134,7 @@ func NewManager(bindAddr string, logger *slog.Logger, lookup SessionLookup) *Man
 		http:     make(map[uint16]*httpListener),
 		tlsPass:  make(map[uint16]*tlsPassListener),
 		guards:   make(map[uint32]*ruleGuard),
+		stats:    make(map[uint32]*ruleCounters),
 	}
 }
 
@@ -202,6 +207,7 @@ func (m *Manager) tcpAcceptLoop(_ string, tl *tcpListener) {
 		release, reason := g.admit(ip)
 		if reason != guardOK {
 			m.Logger.Info("public TCP connection rejected by rule protection", "rule_id", tl.ruleID, "remote", conn.RemoteAddr(), "reason", reason)
+			m.statRejected(tl.ruleID)
 			conn.Close()
 			continue
 		}
@@ -209,11 +215,13 @@ func (m *Manager) tcpAcceptLoop(_ string, tl *tcpListener) {
 		if sess == nil {
 			m.Logger.Warn("public TCP connection arrived but owning client is offline, dropping",
 				"rule_id", tl.ruleID, "remote", conn.RemoteAddr())
+			m.statBackendError(tl.ruleID, "client offline")
 			release()
 			conn.Close()
 			continue
 		}
-		conn = g.wrapConn(&releaseConn{Conn: conn, release: release})
+		done := m.statOpened(tl.ruleID)
+		conn = g.wrapConn(m.countConn(tl.ruleID, &releaseConn{Conn: conn, release: func() { release(); done() }}, false))
 		if err := sess.OpenStreamFor(conn, tl.ruleID); err != nil {
 			m.Logger.Error("failed to forward connection to client", "rule_id", tl.ruleID, "error", err)
 			conn.Close()
@@ -268,11 +276,13 @@ func (m *Manager) udpLoop(ul *udpListener) {
 			release, reason := g.admit(remote.IP)
 			if reason != guardOK {
 				m.Logger.Debug("udp flow rejected by rule protection", "rule_id", ul.ruleID, "remote", key, "reason", reason)
+				m.statRejected(ul.ruleID)
 				continue
 			}
 			sess := m.Lookup(ul.clientID)
 			if sess == nil {
 				release()
+				m.statBackendError(ul.ruleID, "client offline")
 				m.Logger.Warn("udp datagram for offline client, dropping", "rule_id", ul.ruleID, "remote", key)
 				continue
 			}
@@ -282,7 +292,8 @@ func (m *Manager) udpLoop(ul *udpListener) {
 				m.Logger.Error("failed to open udp stream", "rule_id", ul.ruleID, "error", err)
 				continue
 			}
-			flow = &udpFlow{remote: remote, stream: stream, act: make(chan struct{}, 64), release: release, guard: g}
+			done := m.statOpened(ul.ruleID)
+			flow = &udpFlow{remote: remote, stream: stream, act: make(chan struct{}, 64), release: func() { release(); done() }, guard: g}
 			m.mu.Lock()
 			ul.flows[key] = flow
 			m.mu.Unlock()
@@ -292,6 +303,7 @@ func (m *Manager) udpLoop(ul *udpListener) {
 		if !flow.guard.allowBandwidth(n) {
 			continue // 超出规则带宽上限，丢弃该数据报
 		}
+		m.statBytes(ul.ruleID, n, 0)
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
 		if !writeUDPFrame(flow.stream, payload) {
@@ -342,6 +354,7 @@ func (m *Manager) udpFlowRX(ul *udpListener, flow *udpFlow) {
 		if !flow.guard.allowBandwidth(len(payload)) {
 			continue
 		}
+		m.statBytes(ul.ruleID, 0, len(payload))
 		if _, err := ul.conn.WriteToUDP(payload, flow.remote); err != nil {
 			m.reapFlow(ul, flow.remote.String())
 			return
@@ -421,6 +434,7 @@ func (m *Manager) OpenPorts() map[string]uint32 {
 // 端口重新创建）。
 func (m *Manager) Reconcile(desired []RuleView) {
 	m.setGuards(desired)
+	m.pruneStats(desired)
 	want := make(map[string]RuleView)
 	var httpRules, tlsRules []RuleView
 	for _, r := range desired {

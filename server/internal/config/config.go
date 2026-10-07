@@ -29,6 +29,9 @@ type ServerConfig struct {
 	// 留空则使用明文 HTTP（建议仅在内网或前置反代时使用）。
 	PanelTLSCert string `toml:"panel_tls_cert"`
 	PanelTLSKey  string `toml:"panel_tls_key"`
+	// MetricsToken 非空时，面板的 /metrics 允许以 "Authorization: Bearer <token>"
+	// 免登录抓取（供 Prometheus 使用）；为空时 /metrics 需要面板登录会话。
+	MetricsToken string `toml:"metrics_token"`
 
 	// HeartbeatTimeoutSeconds：如果在这么多秒内没有收到某个 Client 的心跳
 	// （或任何流活动），Server 就认为它已断开连接。其公网监听仍保持开启
@@ -144,6 +147,9 @@ panel_port = 8080
 # Serve the admin panel over HTTPS (PEM file paths; both must be set together).
 # panel_tls_cert = "/etc/opennofrp/panel.crt"
 # panel_tls_key = "/etc/opennofrp/panel.key"
+# Allow Prometheus to scrape /metrics with "Authorization: Bearer <token>".
+# Empty = /metrics requires a panel login session.
+# metrics_token = "change-me"
 
 heartbeat_timeout_seconds = 30
 db_path = "/var/lib/opennofrp/opennofrp.db"

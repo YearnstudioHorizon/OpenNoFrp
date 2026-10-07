@@ -64,6 +64,12 @@ type Panel struct {
 	// ClientStatus 返回某个 Client 当前是否有活跃会话、其上报的版本与能力列表。
 	// 由 Server 核心在构造后注入；为 nil 时面板回退为基于 LastSeen 的判断。
 	ClientStatus func(clientID string) (online bool, version string, caps []string)
+	// RuleStats 返回各规则的实时统计（活跃连接、流量、后端错误等），由 Server 核心注入；
+	// 为 nil 时面板不显示统计，/metrics 只输出客户端在线状态。
+	RuleStats func() []listener.RuleStats
+	// MetricsToken 非空时，/metrics 允许使用 "Authorization: Bearer <token>" 免登录抓取
+	// （供 Prometheus 使用）；为空时 /metrics 需要面板登录会话。
+	MetricsToken string
 
 	tmpl *template.Template
 
@@ -72,7 +78,25 @@ type Panel struct {
 }
 
 func New(st *store.Store, logger *slog.Logger, onRules OnRulesChanged, baseURL, controlHost string, controlPort int, fingerprint, clientBinDir string) *Panel {
-	tpl := template.Must(template.ParseFS(templateFS, "templates/*"))
+	tpl := template.Must(template.New("").Funcs(template.FuncMap{
+		// humanBytes 把字节数格式化为 B / KB / MB / GB / TB。
+		"humanBytes": func(n uint64) string {
+			const unit = 1024
+			if n < unit {
+				return fmt.Sprintf("%d B", n)
+			}
+			div, exp := uint64(unit), 0
+			for v := n / unit; v >= unit && exp < 3; v /= unit {
+				div *= unit
+				exp++
+			}
+			return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
+		},
+		// ruleStat 按规则 ID 取统计；不存在时返回零值。
+		"ruleStat": func(m map[int64]listener.RuleStats, id int64) listener.RuleStats {
+			return m[id]
+		},
+	}).ParseFS(templateFS, "templates/*"))
 	return &Panel{
 		Store: st, Logger: logger, OnRules: onRules,
 		BaseURL: baseURL, ControlHost: controlHost, ControlPort: controlPort,
@@ -118,6 +142,8 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("POST /reserved/remove", auth(p.handleRemoveReserved))
 	mux.HandleFunc("POST /admin/password", auth(p.handleChangePassword))
 	mux.HandleFunc("GET /api/check-update", auth(p.handleCheckUpdate))
+	// /metrics 自行鉴权：面板登录会话或 Bearer MetricsToken。
+	mux.HandleFunc("GET /metrics", p.handleMetrics)
 	mux.HandleFunc("GET /install_client.sh", p.handleInstallScript)
 	mux.HandleFunc("GET /dl/{name}", p.handleDownload)
 	static, _ := fs.Sub(templateFS, "static")
@@ -425,6 +451,44 @@ func (p *Panel) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleMetrics 以 Prometheus 文本格式导出规则级统计与客户端在线状态。
+func (p *Panel) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	ok := false
+	if p.MetricsToken != "" {
+		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") &&
+			subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, "Bearer ")), []byte(p.MetricsToken)) == 1 {
+			ok = true
+		}
+	}
+	if !ok && !p.authed(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="opennofrp-metrics"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	rules, err := p.Store.ListAllEnabledRules(r.Context())
+	if err != nil {
+		http.Error(w, "failed to list rules", http.StatusInternalServerError)
+		return
+	}
+	labels := make(map[uint32]listener.RuleLabel, len(rules))
+	for _, ru := range rules {
+		labels[uint32(ru.ID)] = listener.RuleLabel{ClientID: ru.ClientID, Name: ru.Name, Protocol: ru.Protocol, Port: ru.RemotePort}
+	}
+	var stats []listener.RuleStats
+	if p.RuleStats != nil {
+		stats = p.RuleStats()
+	}
+	online := func(clientID string) bool {
+		if p.ClientStatus == nil {
+			return false
+		}
+		o, _, _ := p.ClientStatus(clientID)
+		return o
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	listener.WritePrometheus(w, stats, labels, online)
+}
+
 // ---- 客户端页面 ----------------------------------------------------------
 
 func (p *Panel) handleClientPage(w http.ResponseWriter, r *http.Request) {
@@ -459,7 +523,16 @@ func (p *Panel) handleClientPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 规则实时统计（活跃连接、流量、后端错误），按规则 ID 索引供模板使用。
+	statsByRule := map[int64]listener.RuleStats{}
+	if p.RuleStats != nil {
+		for _, s := range p.RuleStats() {
+			statsByRule[int64(s.RuleID)] = s
+		}
+	}
+
 	p.tmpl.ExecuteTemplate(w, "client.html", map[string]any{
+		"Stats": statsByRule,
 		"Client": struct {
 			ID, Name, LastSeen string
 		}{ID: c.ID, Name: c.Name, LastSeen: lastSeen},
