@@ -73,7 +73,7 @@
               {{end}}
               {{$st := ruleStat $.Stats .ID}}{{if or $st.TotalConns $st.BackendErrors $st.Rejected}}<div class="route-info">活跃 {{$st.ActiveConns}} · 累计 {{$st.TotalConns}} · ↑{{humanBytes $st.BytesIn}} ↓{{humanBytes $st.BytesOut}}{{if $st.Rejected}} · 拦截 {{$st.Rejected}}{{end}}{{if $st.BackendErrors}} · 后端错误 {{$st.BackendErrors}}{{end}}</div>{{if $st.LastError}}<div class="route-info" title="{{$st.LastErrorAt.Format "2006-01-02 15:04:05"}}">最近错误：<span class="mono">{{$st.LastError}}</span></div>{{end}}{{end}}
             </td>
-            <td>{{if eq .Protocol "udp"}}<span style="color:var(--text-faint)">—</span>{{else if .PreserveSourceIP}}<span class="badge badge-amber">保留</span>{{else}}<span style="color:var(--text-faint)">不保留</span>{{end}}</td>
+            <td>{{if .PreserveSourceIP}}<span class="badge badge-amber">保留</span>{{else}}<span style="color:var(--text-faint)">不保留</span>{{end}}</td>
             <td>{{if .Enabled}}<span class="badge badge-green"><span class="dot"></span>启用</span>{{else}}<span class="badge badge-gray"><span class="dot"></span>停用</span>{{end}}</td>
             <td>
               <div class="btn-row">
@@ -295,7 +295,7 @@
           </div>
 
           <div class="check-stack">
-            <label class="check" data-proto-show="http tls tcp tcp+udp"><input type="checkbox" name="preserve_source_ip" value="1" {{if $e}}{{if $e.PreserveSourceIP}}checked{{end}}{{else}}checked{{end}}>保留来源 IP</label>
+            <label class="check" data-proto-show="http tls tcp udp tcp+udp"><input type="checkbox" name="preserve_source_ip" value="1" {{if $e}}{{if $e.PreserveSourceIP}}checked{{end}}{{else}}checked{{end}}>保留来源 IP</label>
             <label class="check"><input type="checkbox" name="enabled" value="1" {{if $e}}{{if $e.Enabled}}checked{{end}}{{else}}checked{{end}}>{{if $e}}启用{{else}}创建后立即启用{{end}}</label>
           </div>
         </div>

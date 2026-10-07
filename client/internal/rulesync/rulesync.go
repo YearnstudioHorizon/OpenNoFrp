@@ -276,18 +276,27 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 	}
 }
 
-// 在 v1 中，开启 preserve_source_ip 的 UDP 有意采用普通转发：TPROXY+UDSP
-// 伪造是一个有待将来单独验证的领域（参见 docs/01-architecture.md），
-// 因此我们按普通方式转发并保持流可用，而不是悄悄生成一个无法工作的伪造流。
+// serveUDP 转发一个 UDP 流。开启 preserve_source_ip 时，按本地端口归属者选择
+// 伪造源地址拨号（宿主机 netns 或容器 netns 内，与 TCP 相同的策略路由 +
+// CONNMARK 回包规则）；任何一步失败都回退为普通转发，保证流可用。
 func (r *Reconciler) serveUDP(ctx context.Context, rule protocol.Rule, meta protocol.StreamMetadata, stream net.Conn) {
-	if rule.PreserveSourceIP {
-		r.Logger.Warn("preserve_source_ip for UDP is not supported yet, forwarding as plain reverse proxy", "rule", rule.Name)
-	}
 	target := net.JoinHostPort(rule.LocalIP, fmt.Sprint(rule.LocalPort))
-	upstream, err := net.Dial("udp", target)
-	if err != nil {
-		r.Logger.Warn("udp dial failed, dropping", "rule", rule.Name, "target", target, "error", err)
-		return
+	var upstream net.Conn
+	if rule.PreserveSourceIP && meta.ClientAddr != nil && !meta.ClientAddr.IsUnspecified() {
+		c, err := r.dialSpoofedUDP(ctx, rule, meta)
+		if err != nil {
+			r.Logger.Warn("udp spoofed dial failed, falling back to plain forwarding", "rule", rule.Name, "error", err)
+		} else {
+			upstream = c
+		}
+	}
+	if upstream == nil {
+		c, err := net.Dial("udp", target)
+		if err != nil {
+			r.Logger.Warn("udp dial failed, dropping", "rule", rule.Name, "target", target, "error", err)
+			return
+		}
+		upstream = c
 	}
 	defer upstream.Close()
 
