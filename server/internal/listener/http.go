@@ -53,6 +53,14 @@ type httpRoute struct {
 	TLSKey        string
 	RedirectHTTPS bool
 	HTTPSPort     uint16 // 该规则所在的 HTTPS 端口，供 80 端口跳转使用
+	// 路由选项（见 httpopts.go）。
+	StripPrefix  bool
+	HostRewrite  string
+	ReqHeaders   []headerOp
+	RespHeaders  []headerOp
+	BasicAuth    map[string]string // user -> bcrypt 哈希；为空表示不启用
+	IPAllow      []*net.IPNet
+	NotFoundPage string
 
 	// cert 是 custom 模式下已解析的证书（解析失败或非 custom 模式为 nil）。
 	cert *tls.Certificate
@@ -199,6 +207,24 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 			realIP, _ := pr.In.Context().Value(ctxKeyRealIP).(net.IP)
 			// 按规则配置的 IP 来源优先级改写 X-Real-IP / X-Forwarded-* / Forwarded 等头
 			rewriteForwardHeaders(pr.In, pr.Out.Header, route, realIP)
+			if route.StripPrefix {
+				stripPathPrefix(pr.Out.URL, route.PathPrefix)
+			}
+			if route.HostRewrite != "" {
+				pr.Out.Host = route.HostRewrite
+			}
+			if len(route.BasicAuth) > 0 {
+				// 凭据仅用于隧道入口鉴权，不泄露给后端。
+				pr.Out.Header.Del("Authorization")
+			}
+			applyHeaderOps(pr.Out.Header, route.ReqHeaders)
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			if resp.Request != nil {
+				route, _ := resp.Request.Context().Value(ctxKeyRoute).(httpRoute)
+				applyHeaderOps(resp.Header, route.RespHeaders)
+			}
+			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			route, _ := r.Context().Value(ctxKeyRoute).(httpRoute)
@@ -223,9 +249,25 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		}
 		hl.mu.RLock()
 		route, ok := matchRoute(hl.routes, r.Host, r.URL.Path)
+		notFoundPage := ""
+		if !ok {
+			notFoundPage = portNotFoundPage(hl.routes)
+		}
 		hl.mu.RUnlock()
 		if !ok {
-			serveNotFound(w, r.Host)
+			serveNotFound(w, r.Host, notFoundPage)
+			return
+		}
+		// 按规则配置的优先级提取真实客户端 IP；该 IP 用于白名单判断、写入转发
+		// 请求头，并写入 StreamMetadata，使 Client 以真实 IP 为源地址伪装拨号后端。
+		realIP, _ := extractClientIP(r, route)
+		if !ipAllowed(realIP, route.IPAllow) {
+			m.Logger.Info("http request rejected by ip allowlist", "rule_id", route.RuleID, "ip", realIP)
+			serveForbidden(w)
+			return
+		}
+		if !checkBasicAuth(r, route.BasicAuth) {
+			serveAuthRequired(w, route)
 			return
 		}
 		sess := m.Lookup(route.ClientID)
@@ -243,9 +285,6 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), ctxKeyRoute, route)
 		ctx = context.WithValue(ctx, ctxKeySession, sess)
-		// 按规则配置的优先级提取真实客户端 IP；该 IP 既写入转发请求头，也写入
-		// StreamMetadata，使 Client 以真实 IP 为源地址伪装拨号后端。
-		realIP, _ := extractClientIP(r, route)
 		ctx = context.WithValue(ctx, ctxKeyRealIP, realIP)
 		if ap, err := net.ResolveTCPAddr("tcp", r.RemoteAddr); err == nil {
 			remote := &net.TCPAddr{IP: ap.IP, Port: ap.Port}
@@ -289,7 +328,13 @@ func serveUnavailable(w http.ResponseWriter, route httpRoute) {
 	_ = defaultUnavailableTmpl.Execute(w, route)
 }
 
-func serveNotFound(w http.ResponseWriter, host string) {
+func serveNotFound(w http.ResponseWriter, host, page string) {
+	if strings.TrimSpace(page) != "" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, page)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusNotFound)
 	fmt.Fprintf(w, "404 no route for host %q\n", normalizeRequestHost(host))
@@ -381,6 +426,29 @@ func (m *Manager) reconcileHTTP(desired []RuleView) {
 			TLSKey:         r.TLSKey,
 			RedirectHTTPS:  r.RedirectHTTPS,
 			HTTPSPort:      r.Port,
+			StripPrefix:    r.StripPrefix,
+			HostRewrite:    r.HostRewrite,
+			IPAllow:        r.IPAllow,
+			NotFoundPage:   r.NotFoundPage,
+		}
+		if ops, err := parseHeaderOps(r.ReqHeaders); err != nil {
+			m.Logger.Warn("http rule has invalid request headers", "rule_id", r.ID, "error", err)
+		} else {
+			route.ReqHeaders = ops
+		}
+		if ops, err := parseHeaderOps(r.RespHeaders); err != nil {
+			m.Logger.Warn("http rule has invalid response headers", "rule_id", r.ID, "error", err)
+		} else {
+			route.RespHeaders = ops
+		}
+		if r.BasicAuth != "" {
+			accounts, err := ParseBasicAuth(r.BasicAuth)
+			if err != nil || len(accounts) == 0 {
+				// 鉴权配置损坏时宁可拒绝访问也不放行：放入一个无法匹配的账户。
+				m.Logger.Warn("http rule has invalid basic auth, denying all requests", "rule_id", r.ID, "error", err)
+				accounts = map[string]string{"\x00invalid": string(dummyBcrypt)}
+			}
+			route.BasicAuth = accounts
 		}
 		if r.TLSMode == "custom" {
 			c, err := parseRouteCert(r.TLSCert, r.TLSKey)

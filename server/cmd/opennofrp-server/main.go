@@ -282,6 +282,13 @@ func (s *server) reconcileListeners(ctx context.Context) {
 			v.TLSCert = r.TLSCert
 			v.TLSKey = r.TLSKey
 			v.RedirectHTTPS = r.RedirectHTTPS == "1"
+			v.StripPrefix = r.StripPrefix == "1"
+			v.HostRewrite = r.HostRewrite
+			v.ReqHeaders = r.ReqHeaders
+			v.RespHeaders = r.RespHeaders
+			v.BasicAuth = r.BasicAuth
+			v.IPAllow, _ = listener.ParseTrustedProxies(r.IPAllow)
+			v.NotFoundPage = r.NotFoundPage
 		} else if r.Protocol == "tls" {
 			v.Name = r.Name
 			v.Domains = store.SplitDomains(r.Domains)

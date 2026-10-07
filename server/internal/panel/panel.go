@@ -252,6 +252,16 @@ func friendlyMsg(s string) string {
 		return "HTTPS 模式无效"
 	case "redirect needs domain":
 		return "开启 HTTP→HTTPS 跳转需要绑定至少一个域名"
+	case "bad host rewrite":
+		return "Host 改写无效，请填写域名、IP 或 域名:端口（如 internal.local:8080）"
+	case "bad req headers":
+		return "自定义请求头无效：每行一个 \"Name: Value\"（值留空表示删除），不能修改 Host/Connection 等逐跳头"
+	case "bad resp headers":
+		return "自定义响应头无效：每行一个 \"Name: Value\"（值留空表示删除），不能修改 Connection 等逐跳头"
+	case "bad basic auth":
+		return "Basic Auth 账户无效：每行一个 \"用户名:密码\"，用户名不能含空格"
+	case "not found page too large":
+		return "自定义 404 页面过大（上限 64 KB）"
 	case "password too short":
 		return "新密码长度至少 6 位"
 	case "invalid current password":
@@ -264,6 +274,9 @@ func friendlyMsg(s string) string {
 	}
 	if strings.HasPrefix(s, "bad trusted proxy ") {
 		return fmt.Sprintf("可信代理 %s 无效，请填写 IP 或 CIDR（如 173.245.48.0/20）", strings.TrimPrefix(s, "bad trusted proxy "))
+	}
+	if strings.HasPrefix(s, "bad ip allow ") {
+		return fmt.Sprintf("IP 白名单条目 %s 无效，请填写 IP 或 CIDR（如 192.168.0.0/16）", strings.TrimPrefix(s, "bad ip allow "))
 	}
 	if strings.HasPrefix(s, "bad domain ") {
 		return fmt.Sprintf("域名 %s 无效，请填写如 example.com 或 *.example.com 的域名", strings.TrimPrefix(s, "bad domain "))
@@ -523,6 +536,77 @@ func (p *Panel) parseRuleForm(r *http.Request, clientID string, excludeID int64)
 			}
 			rule.RedirectHTTPS = "1"
 		}
+
+		// 路由选项：剥离前缀、Host 改写、自定义头、Basic Auth、IP 白名单、404 页面。
+		if r.FormValue("strip_prefix") == "1" && rule.PathPrefix != "" {
+			rule.StripPrefix = "1"
+		}
+		hostRewrite := strings.TrimSpace(r.FormValue("host_rewrite"))
+		if hostRewrite != "" {
+			h := hostRewrite
+			if hh, port, err := net.SplitHostPort(hostRewrite); err == nil {
+				if pn, err := strconv.Atoi(port); err != nil || pn <= 0 || pn > 65535 {
+					return store.Rule{}, "bad host rewrite"
+				}
+				h = hh
+			}
+			if net.ParseIP(h) == nil && (len(h) > 253 || strings.HasPrefix(h, "*.") || !validDomainRegex.MatchString(strings.ToLower(h))) {
+				return store.Rule{}, "bad host rewrite"
+			}
+		}
+		rule.HostRewrite = hostRewrite
+		reqHeaders := strings.TrimSpace(r.FormValue("req_headers"))
+		if err := listener.ValidateHeaderOps(reqHeaders); err != nil {
+			return store.Rule{}, "bad req headers"
+		}
+		rule.ReqHeaders = reqHeaders
+		respHeaders := strings.TrimSpace(r.FormValue("resp_headers"))
+		if err := listener.ValidateHeaderOps(respHeaders); err != nil {
+			return store.Rule{}, "bad resp headers"
+		}
+		rule.RespHeaders = respHeaders
+
+		// Basic Auth：每行 "user:password"；若密码部分已是 bcrypt 哈希（编辑时回显的
+		// 已保存值）则原样保留，否则视为明文并哈希后保存。
+		var authLines []string
+		for _, line := range strings.Split(strings.ReplaceAll(r.FormValue("basic_auth"), "\r\n", "\n"), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			user, pass, ok := strings.Cut(line, ":")
+			user = strings.TrimSpace(user)
+			if !ok || user == "" || pass == "" || strings.ContainsAny(user, " \t") {
+				return store.Rule{}, "bad basic auth"
+			}
+			if !(strings.HasPrefix(pass, "$2a$") || strings.HasPrefix(pass, "$2b$") || strings.HasPrefix(pass, "$2y$")) {
+				h, err := listener.HashBasicAuthPassword(pass)
+				if err != nil {
+					return store.Rule{}, "bad basic auth"
+				}
+				pass = h
+			}
+			authLines = append(authLines, user+":"+pass)
+		}
+		basicAuth := strings.Join(authLines, "\n")
+		if _, err := listener.ParseBasicAuth(basicAuth); err != nil {
+			return store.Rule{}, "bad basic auth"
+		}
+		rule.BasicAuth = basicAuth
+
+		ipAllow := strings.TrimSpace(r.FormValue("ip_allow"))
+		if _, bad := listener.ParseTrustedProxies(ipAllow); len(bad) > 0 {
+			return store.Rule{}, "bad ip allow " + bad[0]
+		}
+		rule.IPAllow = strings.Join(strings.FieldsFunc(ipAllow, func(c rune) bool {
+			return c == ',' || c == ' ' || c == ';' || c == '\n' || c == '\r' || c == '\t'
+		}), ",")
+
+		notFoundPage := r.FormValue("not_found_page")
+		if len(notFoundPage) > maxOfflinePageBytes {
+			return store.Rule{}, "not found page too large"
+		}
+		rule.NotFoundPage = notFoundPage
 	}
 	if protocol == "tls" {
 		// TLS 透传：只按 SNI 域名路由，不解密，证书由内网后端持有。

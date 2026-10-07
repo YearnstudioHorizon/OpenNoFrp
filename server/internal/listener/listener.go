@@ -39,6 +39,20 @@ type RuleView struct {
 	TLSKey  string
 	// RedirectHTTPS 为 true 时，在明文 80 端口上把该规则域名的请求 301 跳转到 HTTPS。
 	RedirectHTTPS bool
+	// HTTP 路由选项（见 httpopts.go）。
+	// StripPrefix 为 true 时转发前去掉 PathPrefix。
+	StripPrefix bool
+	// HostRewrite 非空时，发往后端的 Host 头改写为该值。
+	HostRewrite string
+	// ReqHeaders / RespHeaders 是原始的每行一个 "Name: Value" 文本。
+	ReqHeaders  string
+	RespHeaders string
+	// BasicAuth 是原始的每行一个 "user:bcrypt哈希" 文本，为空表示不启用。
+	BasicAuth string
+	// IPAllow 非空时仅允许真实 IP 落在其中的访问者。
+	IPAllow []*net.IPNet
+	// NotFoundPage 是该端口无匹配路由时返回的自定义 404 HTML。
+	NotFoundPage string
 }
 
 // expandRule 将一条双栈（"tcp+udp"）规则拆分为一个 TCP 视图和一个 UDP
