@@ -23,10 +23,14 @@ func (r *Reconciler) dialSpoofedUDP(ctx context.Context, rule protocol.Rule, met
 	if (targetIP.To4() != nil) != (meta.ClientAddr.To4() != nil) {
 		return nil, fmt.Errorf("visitor address %s and backend %s are different address families", meta.ClientAddr, targetIP)
 	}
+	// The routing and CONNMARK setup currently supports IPv4 only.
+	if targetIP.To4() == nil {
+		return nil, fmt.Errorf("UDP source IP preservation currently requires IPv4")
+	}
 	dialer := tproxy.SpoofedDialer{FWMark: sharedFWMark}
 
-	// 端口归属探测失败时（例如只探测到 TCP 监听），按宿主机进程处理。
-	owner, err := envcheck.DetectPortOwner(rule.LocalPort)
+	// Probe UDP independently; TCP on the same port may belong to another netns.
+	owner, err := envcheck.DetectUDPPortOwner(rule.LocalPort)
 	if err == nil && owner.Kind == envcheck.OwnerDockerBridgeNetwork {
 		cns := netnsworker.ContainerNetns{PID: owner.PID}
 		if err := r.ensureNetnsReady(cns); err != nil {
@@ -37,12 +41,16 @@ func (r *Reconciler) dialSpoofedUDP(ctx context.Context, rule protocol.Rule, met
 			err error
 		}
 		ch := make(chan result, 1)
+		containerPort := rule.LocalPort
+		if owner.TargetPort != 0 {
+			containerPort = owner.TargetPort
+		}
 		go func() {
 			if err := cns.Enter(); err != nil {
 				ch <- result{nil, fmt.Errorf("enter container netns: %w", err)}
 				return
 			}
-			c, err := dialer.DialSpoofedUDP(ctx, meta.ClientAddr, meta.ClientPort, net.ParseIP("127.0.0.1"), rule.LocalPort)
+			c, err := dialer.DialSpoofedUDP(ctx, meta.ClientAddr, meta.ClientPort, net.ParseIP("127.0.0.1"), containerPort)
 			ch <- result{c, err}
 		}()
 		res := <-ch

@@ -112,6 +112,48 @@ func (m Manager) Setup(ingressIface string, routeTable int, sharedFWMark uint32,
 	return m.saveState(st)
 }
 
+// SetupRuntime persists the host routing and sysctl changes used by direct
+// source-address spoofing, while retaining any managed listener rules.
+func (m Manager) SetupRuntime(ingressIface string, routeTable int, sharedFWMark uint32) error {
+	existing, err := m.LoadState()
+	if err != nil {
+		return err
+	}
+	var rules []RuleSpec
+	var snapshot SysctlSnapshot
+	if existing != nil {
+		rules = existing.Rules
+		snapshot = existing.SysctlSnapshot
+	}
+	if snapshot == nil {
+		snapshot, err = CaptureSysctlSnapshot(ingressIface)
+		if err != nil {
+			return fmt.Errorf("tproxy: capture sysctl snapshot: %w", err)
+		}
+	}
+	if err := ApplySysctls(ingressIface); err != nil {
+		return fmt.Errorf("tproxy: apply sysctls: %w", err)
+	}
+	rollback := func() {
+		_ = RemoveConnmarkReplyRules(sharedFWMark)
+		_ = RemovePolicyRoute(routeTable, sharedFWMark)
+		_ = RestoreSysctls(snapshot)
+	}
+	if err := EnsurePolicyRoute(routeTable, sharedFWMark); err != nil {
+		rollback()
+		return fmt.Errorf("tproxy: ensure policy route: %w", err)
+	}
+	if err := EnsureConnmarkReplyRules(sharedFWMark); err != nil {
+		rollback()
+		return fmt.Errorf("tproxy: ensure CONNMARK reply rules: %w", err)
+	}
+	if err := m.saveState(State{IngressIface: ingressIface, RouteTable: routeTable, FWMark: sharedFWMark, Rules: rules, SysctlSnapshot: snapshot}); err != nil {
+		rollback()
+		return err
+	}
+	return nil
+}
+
 // Teardown 移除持久化状态中记录的所有内容：iptables 规则、策略路由，并将
 // sysctls 恢复为安装前的值。卸载脚本调用的就是它。若状态文件不存在（从未
 // 进行过配置，或已被拆除），则不执行任何操作。

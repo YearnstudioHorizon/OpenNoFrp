@@ -9,6 +9,7 @@ package rulesync
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -253,6 +254,10 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 		// 该 goroutine 必须在调用 socket() 之前以 runtime.LockOSThread 的方式
 		// Enter() 此 netns。
 		containerIP := net.ParseIP("127.0.0.1")
+		containerPort := rule.LocalPort
+		if owner.TargetPort != 0 {
+			containerPort = owner.TargetPort
+		}
 		upstreamCh := make(chan net.Conn, 1)
 		errCh := make(chan error, 1)
 		go func() {
@@ -261,7 +266,7 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 				return
 			}
 			dialer := tproxy.SpoofedDialer{FWMark: sharedFWMark}
-			upstream, err := dialer.DialSpoofed(ctx, meta.ClientAddr, containerIP, rule.LocalPort)
+			upstream, err := dialer.DialSpoofed(ctx, meta.ClientAddr, containerIP, containerPort)
 			if err != nil {
 				errCh <- err
 				return
@@ -332,14 +337,8 @@ func (r *Reconciler) ensureHostTPROXYReady() error {
 	if err != nil {
 		return fmt.Errorf("detect ingress interface: %w", err)
 	}
-	if err := tproxy.ApplySysctls(iface); err != nil {
+	if err := (tproxy.Manager{StateDir: r.StateDir}).SetupRuntime(iface, tproxy.DefaultRouteTable, sharedFWMark); err != nil {
 		return err
-	}
-	if err := tproxy.EnsurePolicyRoute(tproxy.DefaultRouteTable, sharedFWMark); err != nil {
-		return err
-	}
-	if err := tproxy.EnsureConnmarkReplyRules(sharedFWMark); err != nil {
-		return fmt.Errorf("ensure CONNMARK reply rules: %w", err)
 	}
 	r.hostSetupDone = true
 	r.Logger.Info("host TPROXY environment prepared (sysctls + policy route + CONNMARK)", "iface", iface)
@@ -369,7 +368,10 @@ func (r *Reconciler) ensureNetnsReady(cns netnsworker.ContainerNetns) error {
 		}
 		// 回包路径的要求与宿主机路径相同，但安装在容器的 netns 内
 		// （我们已通过 setns() 进入，因此 iptables-legacy 操作的是容器自己的表）。
-		return tproxy.EnsureConnmarkReplyRules(sharedFWMark)
+		if err := tproxy.EnsureConnmarkReplyRules(sharedFWMark); err != nil {
+			return fmt.Errorf("ensure CONNMARK reply rules: %w", err)
+		}
+		return nil
 	})
 	if err != nil {
 		return err
@@ -388,7 +390,7 @@ func dialPlain(ctx context.Context, addr string) (net.Conn, error) {
 }
 
 func relay(a, b net.Conn) {
-	done := make(chan struct{}, 2)
+	done := make(chan error, 2)
 	cp := func(dst, src net.Conn) {
 		buf := make([]byte, 32*1024)
 		for {
@@ -399,13 +401,24 @@ func relay(a, b net.Conn) {
 				}
 			}
 			if err != nil {
+				if err == io.EOF {
+					if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+						_ = cw.CloseWrite()
+					}
+					done <- nil
+					return
+				}
 				break
 			}
 		}
-		done <- struct{}{}
+		done <- fmt.Errorf("relay direction closed")
 	}
 	go cp(a, b)
 	go cp(b, a)
+	if err := <-done; err != nil {
+		_ = a.Close()
+		_ = b.Close()
+	}
 	<-done
 }
 
@@ -415,7 +428,7 @@ func copyUDPFrames(stream, upstream net.Conn) {
 	buf := make([]byte, 64*1024)
 	for {
 		n, err := upstream.Read(buf)
-		if n > 0 {
+		if n > 0 || err == nil {
 			if !writeUDPFrame(stream, buf[:n]) {
 				return
 			}
@@ -443,13 +456,27 @@ func writeUDPFrame(w net.Conn, payload []byte) bool {
 		return false
 	}
 	hdr := []byte{byte(len(payload) >> 8), byte(len(payload))}
-	if _, err := w.Write(hdr); err != nil {
+	if err := writeAll(w, hdr); err != nil {
 		return false
 	}
-	if _, err := w.Write(payload); err != nil {
+	if err := writeAll(w, payload); err != nil {
 		return false
 	}
 	return true
+}
+
+func writeAll(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
 }
 
 func readUDPFrame(r net.Conn) ([]byte, error) {

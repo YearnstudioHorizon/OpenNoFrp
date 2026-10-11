@@ -199,72 +199,45 @@ const connmarkComment = "opennofrp-connmark"
 // 端到端验证通过：对本地 HTTP 服务的伪造源地址 connect() 成功完成，且该服务
 // 以伪造的源 IP 接受了连接。
 // 幂等：在每条设置路径上调用都是安全的，不会累积重复规则。
-func EnsureConnmarkReplyRules(fwmark uint32) error {
+func connmarkReplyRules(fwmark uint32) [][]string {
 	mask := fmt.Sprintf("0x%x", fwmark)
-	markSpec := fwmarkSpec(fwmark)
-	zeroSpec := fmt.Sprintf("0x%x/0x%x", 0, fwmark)
-
-	saveArgs := []string{
-		"-p", "tcp",
-		"-m", "mark", "--mark", markSpec,
-		"-m", "comment", "--comment", connmarkComment,
-		"-j", "CONNMARK", "--save-mark",
-		"--nfmask", mask, "--ctmask", mask,
-	}
-	if !ruleExists("mangle", "OUTPUT", saveArgs...) {
-		if err := runIptables(append([]string{"-t", "mangle", "-A", "OUTPUT"}, saveArgs...)...); err != nil {
-			return err
+	var rules [][]string
+	for _, transport := range []string{"tcp", "udp"} {
+		for _, action := range []string{"--save-mark", "--restore-mark"} {
+			mark := fwmarkSpec(fwmark)
+			if action == "--restore-mark" {
+				mark = fmt.Sprintf("0x0/0x%x", fwmark)
+			}
+			rules = append(rules, []string{"-p", transport, "-m", "mark", "--mark", mark,
+				"-m", "comment", "--comment", connmarkComment, "-j", "CONNMARK", action,
+				"--nfmask", mask, "--ctmask", mask})
 		}
 	}
+	return rules
+}
 
-	restoreArgs := []string{
-		"-p", "tcp",
-		"-m", "mark", "--mark", zeroSpec,
-		"-m", "comment", "--comment", connmarkComment,
-		"-j", "CONNMARK", "--restore-mark",
-		"--nfmask", mask, "--ctmask", mask,
-	}
-	if !ruleExists("mangle", "OUTPUT", restoreArgs...) {
-		if err := runIptables(append([]string{"-t", "mangle", "-A", "OUTPUT"}, restoreArgs...)...); err != nil {
-			return err
+func EnsureConnmarkReplyRules(fwmark uint32) error {
+	for _, args := range connmarkReplyRules(fwmark) {
+		if !ruleExists("mangle", "OUTPUT", args...) {
+			if err := runIptables(append([]string{"-t", "mangle", "-A", "OUTPUT"}, args...)...); err != nil {
+				return err
+			}
 		}
 	}
-
 	return nil
 }
 
-// RemoveConnmarkReplyRules 精确删除 EnsureConnmarkReplyRules 为该 fwmark
-// 添加的规则。它是幂等的，在 iptables-legacy 或这些规则不存在时也是安全的
-// （供卸载程序路径使用，该路径不能仅仅因为 Client 从未运行到安装这些规则的
-// 阶段就失败）。
+// RemoveConnmarkReplyRules removes both TCP and UDP rules, including rules left
+// by older clients that installed only TCP rules.
 func RemoveConnmarkReplyRules(fwmark uint32) error {
-	mask := fmt.Sprintf("0x%x", fwmark)
-	markSpec := fwmarkSpec(fwmark)
-	zeroSpec := fmt.Sprintf("0x%x/0x%x", 0, fwmark)
-
 	var firstErr error
-	tryDelete := func(args ...string) {
-		if !ruleExists("mangle", "OUTPUT", args...) {
-			return
-		}
-		full := append([]string{"-t", "mangle", "-D", "OUTPUT"}, args...)
-		if err := runIptables(full...); err != nil && firstErr == nil {
-			firstErr = err
+	for _, args := range connmarkReplyRules(fwmark) {
+		if ruleExists("mangle", "OUTPUT", args...) {
+			if err := runIptables(append([]string{"-t", "mangle", "-D", "OUTPUT"}, args...)...); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-
-	tryDelete("-p", "tcp",
-		"-m", "mark", "--mark", markSpec,
-		"-m", "comment", "--comment", connmarkComment,
-		"-j", "CONNMARK", "--save-mark",
-		"--nfmask", mask, "--ctmask", mask)
-
-	tryDelete("-p", "tcp",
-		"-m", "mark", "--mark", zeroSpec,
-		"-m", "comment", "--comment", connmarkComment,
-		"-j", "CONNMARK", "--restore-mark",
-		"--nfmask", mask, "--ctmask", mask)
-
 	return firstErr
 }
 
@@ -278,7 +251,7 @@ func ListOpenNoFrpRules() (string, error) {
 	}
 	var kept []string
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "opennofrp-port-") {
+		if strings.Contains(line, "opennofrp-port-") || strings.Contains(line, connmarkComment) {
 			kept = append(kept, line)
 		}
 	}

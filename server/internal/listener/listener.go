@@ -151,6 +151,7 @@ type udpFlow struct {
 	remote  *net.UDPAddr
 	stream  net.Conn
 	act     chan struct{} // 接收来自解复用循环的客户端数据报
+	writeQ  chan []byte   // 有界队列，避免慢客户端阻塞整个 UDP 监听器
 	release func()        // 释放规则防护的并发流计数（见 protect.go）
 	guard   *ruleGuard
 }
@@ -324,12 +325,13 @@ func (m *Manager) udpLoop(ul *udpListener) {
 				continue
 			}
 			done := m.statOpened(ul.ruleID)
-			flow = &udpFlow{remote: remote, stream: stream, act: make(chan struct{}, 64), release: func() { release(); done() }, guard: g}
+			flow = &udpFlow{remote: remote, stream: stream, act: make(chan struct{}, 64), writeQ: make(chan []byte, 64), release: func() { release(); done() }, guard: g}
 			m.mu.Lock()
 			ul.flows[key] = flow
 			m.mu.Unlock()
 			go m.udpFlowTX(ul, flow) // UDP 套接字 -> stream
 			go m.udpFlowRX(ul, flow) // stream -> UDP 套接字
+			go m.udpFlowWriter(ul, flow)
 		}
 		if !flow.guard.allowBandwidth(n) {
 			continue // 超出规则带宽上限，丢弃该数据报
@@ -337,8 +339,9 @@ func (m *Manager) udpLoop(ul *udpListener) {
 		m.statBytes(ul.ruleID, n, 0)
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
-		if !writeUDPFrame(flow.stream, payload) {
-			m.reapFlow(ul, key)
+		select {
+		case flow.writeQ <- payload:
+		default: // 该访客的队列已满，丢弃此包，不阻塞其他访客
 			continue
 		}
 		// 触发该流自身的看门狗，使空闲流最终能够关闭
@@ -366,10 +369,24 @@ func (m *Manager) udpFlowTX(ul *udpListener, flow *udpFlow) {
 			}
 			t.Reset(120 * time.Second)
 		case <-t.C:
-			m.reapFlow(ul, flow.remote.String())
+			m.reapFlow(ul, flow)
 			return
 		case <-ul.done:
-			m.reapFlow(ul, flow.remote.String())
+			m.reapFlow(ul, flow)
+			return
+		}
+	}
+}
+
+func (m *Manager) udpFlowWriter(ul *udpListener, flow *udpFlow) {
+	for {
+		select {
+		case payload := <-flow.writeQ:
+			if !writeUDPFrame(flow.stream, payload) {
+				m.reapFlow(ul, flow)
+				return
+			}
+		case <-ul.done:
 			return
 		}
 	}
@@ -379,7 +396,7 @@ func (m *Manager) udpFlowRX(ul *udpListener, flow *udpFlow) {
 	for {
 		payload, err := readUDPFrame(flow.stream)
 		if err != nil {
-			m.reapFlow(ul, flow.remote.String())
+			m.reapFlow(ul, flow)
 			return
 		}
 		if !flow.guard.allowBandwidth(len(payload)) {
@@ -387,17 +404,20 @@ func (m *Manager) udpFlowRX(ul *udpListener, flow *udpFlow) {
 		}
 		m.statBytes(ul.ruleID, 0, len(payload))
 		if _, err := ul.conn.WriteToUDP(payload, flow.remote); err != nil {
-			m.reapFlow(ul, flow.remote.String())
+			m.reapFlow(ul, flow)
 			return
 		}
 	}
 }
 
-func (m *Manager) reapFlow(ul *udpListener, key string) {
+func (m *Manager) reapFlow(ul *udpListener, flow *udpFlow) {
+	key := flow.remote.String()
 	m.mu.Lock()
-	flow, ok := ul.flows[key]
-	if ok {
+	current, ok := ul.flows[key]
+	if ok && current == flow {
 		delete(ul.flows, key)
+	} else {
+		ok = false
 	}
 	m.mu.Unlock()
 	if ok {

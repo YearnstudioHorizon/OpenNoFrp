@@ -50,6 +50,7 @@ func (k PortOwnerKind) String() string {
 type PortOwnerInfo struct {
 	Kind          PortOwnerKind
 	PID           int
+	TargetPort    uint16 // container-side port for Docker mappings
 	ProcessName   string
 	ContainerID   string // 仅在端口归属 Docker 时设置
 	ContainerName string // 仅在端口归属 Docker 时设置，需要 `docker` CLI
@@ -87,11 +88,23 @@ func firstNonEmpty(ss ...string) string {
 // 该函数完全只读：它解析 /proc/net/tcp[6] 和 /proc/<pid>/cgroup，并可选地调用
 // `docker inspect`（同样只读）来解析便于阅读的容器名称。它从不修改任何内容。
 func DetectPortOwner(port uint16) (PortOwnerInfo, error) {
-	pid, err := findListeningPID(port)
+	return detectPortOwner(port, "tcp")
+}
+
+// DetectUDPPortOwner detects UDP sockets independently of TCP on the same port.
+func DetectUDPPortOwner(port uint16) (PortOwnerInfo, error) {
+	return detectPortOwner(port, "udp")
+}
+
+func detectPortOwner(port uint16, transport string) (PortOwnerInfo, error) {
+	pid, err := findListeningPID(port, transport)
 	if err != nil {
 		return PortOwnerInfo{Kind: OwnerUnknown}, err
 	}
 	if pid == 0 {
+		if cid, statePID, name, targetPort := findContainerPublishingPort(port, transport); cid != "" {
+			return PortOwnerInfo{Kind: OwnerDockerBridgeNetwork, PID: statePID, ContainerID: cid, ContainerName: name, TargetPort: targetPort}, nil
+		}
 		return PortOwnerInfo{Kind: OwnerUnknown}, fmt.Errorf("no process found listening on port %d", port)
 	}
 
@@ -104,10 +117,11 @@ func DetectPortOwner(port uint16) (PortOwnerInfo, error) {
 		// containerd 或 docker-proxy——持有宿主机侧发布的端口时，这正是预期的
 		// 情况。此时询问 Docker 实际是谁发布了该端口，并改为按容器的进程进行
 		// 分类。
-		if cid, statePID, containerName := findContainerPublishingPort(port); cid != "" {
+		if cid, statePID, containerName, targetPort := findContainerPublishingPort(port, transport); cid != "" {
 			info.ContainerID = cid
 			info.ContainerName = containerName
 			info.PID = statePID
+			info.TargetPort = targetPort
 			if inHostNetnsOf(statePID) {
 				info.Kind = OwnerDockerHostNetwork
 			} else {
@@ -145,16 +159,12 @@ func inHostNetnsOf(pid int) bool {
 // 会把宿主机侧的监听 socket 放在宿主机 netns 中，因此监听 PID 不带任何 /docker/
 // cgroup 线索，纯粹基于 /proc 的检测无法对该端口分类。正是这个回退机制让
 // OwnerDockerBridgeNetwork 检测在这种极其常见的情况下得以工作。
-func findContainerPublishingPort(port uint16) (containerID string, statePID int, containerName string) {
+func findContainerPublishingPort(port uint16, transport string) (containerID string, statePID int, containerName string, targetPort uint16) {
 	out, err := exec.Command("docker", "ps", "--no-trunc").Output()
 	if err != nil {
-		return "", 0, ""
+		return "", 0, "", 0
 	}
-	want := strconv.Itoa(int(port)) + "->"
 	for _, line := range strings.Split(string(out), "\n") {
-		if !strings.Contains(line, want) {
-			continue
-		}
 		fields := strings.Fields(line)
 		if len(fields) < 1 {
 			continue
@@ -164,7 +174,8 @@ func findContainerPublishingPort(port uint16) (containerID string, statePID int,
 		// "0.0.0.0:<port>-><port>/tcp" 片段，而不是做子串匹配，以避免
 		// "80->" 与 "8080->" 之类的误判，例如要求数字前面是 ':' 或端口规格的
 		// 起始位置。
-		if idx := strings.Index(line, ":"+want); idx == -1 {
+		containerPort, ok := publishedContainerPort(line, port, transport)
+		if !ok {
 			continue
 		}
 		pidOut, err := exec.Command("docker", "inspect", "-f", "{{.State.Pid}}", candidate).Output()
@@ -177,22 +188,22 @@ func findContainerPublishingPort(port uint16) (containerID string, statePID int,
 		}
 		nameOut, _ := exec.Command("docker", "inspect", "-f", "{{.Name}}", candidate).Output()
 		containerName = strings.TrimPrefix(strings.TrimSpace(string(nameOut)), "/")
-		return candidate, statePID, containerName
+		return candidate, statePID, containerName, containerPort
 	}
-	return "", 0, ""
+	return "", 0, "", 0
 }
 
 // findListeningPID 扫描 /proc/net/tcp 和 /proc/net/tcp6，查找给定端口上处于
 // LISTEN 状态的 socket，然后遍历 /proc/<pid>/fd 找出拥有该 socket inode 的进程。
 // 这与 `ss -tlnp` 内部的做法一致，这里直接实现，以免依赖 `ss`/`netstat`
 // 可执行文件的存在。
-func findListeningPID(port uint16) (int, error) {
-	inode, err := findListeningInode("/proc/net/tcp", port)
+func findListeningPID(port uint16, transport string) (int, error) {
+	inode, err := findListeningInode("/proc/net/"+transport, port, transport)
 	if err != nil {
 		return 0, err
 	}
 	if inode == "" {
-		inode, err = findListeningInode("/proc/net/tcp6", port)
+		inode, err = findListeningInode("/proc/net/"+transport+"6", port, transport)
 		if err != nil {
 			return 0, err
 		}
@@ -233,7 +244,7 @@ func findListeningPID(port uint16) (int, error) {
 // LISTEN（状态 0A）条目，并返回其 inode。
 const tcpListenState = "0A"
 
-func findListeningInode(path string, port uint16) (string, error) {
+func findListeningInode(path string, port uint16, transport string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -264,7 +275,7 @@ func findListeningInode(path string, port uint16) (string, error) {
 			continue
 		}
 		portHex := strings.ToUpper(parts[1])
-		if portHex == wantHex && state == tcpListenState {
+		if portHex == wantHex && ((transport == "tcp" && state == tcpListenState) || (transport == "udp" && state == "07")) {
 			return inode, nil
 		}
 	}
@@ -364,4 +375,25 @@ func dockerContainerName(containerID string) string {
 		return ""
 	}
 	return strings.TrimPrefix(strings.TrimSpace(string(out)), "/")
+}
+
+// publishedContainerPort returns the container-side port for a matching Docker mapping.
+func publishedContainerPort(line string, port uint16, transport string) (uint16, bool) {
+	for _, field := range strings.Fields(line) {
+		for _, field := range strings.Split(field, ",") {
+			mapping := strings.SplitN(strings.TrimSpace(field), "->", 2)
+			if len(mapping) != 2 || !strings.HasSuffix(mapping[1], "/"+transport) {
+				continue
+			}
+			colon := strings.LastIndex(mapping[0], ":")
+			if colon < 0 || mapping[0][colon+1:] != strconv.Itoa(int(port)) {
+				continue
+			}
+			n, err := strconv.ParseUint(strings.TrimSuffix(mapping[1], "/"+transport), 10, 16)
+			if err == nil && n > 0 {
+				return uint16(n), true
+			}
+		}
+	}
+	return 0, false
 }

@@ -207,7 +207,7 @@ func relay(publicConn net.Conn, stream net.Conn, logger *slog.Logger) {
 	defer publicConn.Close()
 	defer stream.Close()
 
-	done := make(chan struct{}, 2)
+	done := make(chan error, 2)
 	cp := func(dst, src net.Conn) {
 		buf := make([]byte, 32*1024)
 		for {
@@ -218,12 +218,23 @@ func relay(publicConn net.Conn, stream net.Conn, logger *slog.Logger) {
 				}
 			}
 			if err != nil {
+				if err == io.EOF {
+					if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+						_ = cw.CloseWrite()
+					}
+					done <- nil
+					return
+				}
 				break
 			}
 		}
-		done <- struct{}{}
+		done <- fmt.Errorf("relay direction closed")
 	}
 	go cp(publicConn, stream)
 	go cp(stream, publicConn)
+	if err := <-done; err != nil {
+		_ = publicConn.Close()
+		_ = stream.Close()
+	}
 	<-done
 }
