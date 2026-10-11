@@ -103,7 +103,7 @@ func (info *UpdateInfo) FindMatchingAsset(componentName string, assets []Release
 	}
 
 	for _, a := range assets {
-		if strings.EqualFold(a.Name, targetSuffix) || strings.Contains(strings.ToLower(a.Name), strings.ToLower(targetSuffix)) {
+		if strings.EqualFold(a.Name, targetSuffix) {
 			return a.BrowserDownloadURL
 		}
 	}
@@ -215,10 +215,21 @@ func SelfUpdate(ctx context.Context, componentName string) error {
 	}
 	defer os.Remove(tmpFile.Name())
 
-	_, err = io.Copy(tmpFile, downResp.Body)
-	tmpFile.Close()
+	written, err := io.Copy(tmpFile, downResp.Body)
 	if err != nil {
+		_ = tmpFile.Close()
 		return fmt.Errorf("写入临时升级文件失败: %w", err)
+	}
+	if written == 0 {
+		_ = tmpFile.Close()
+		return fmt.Errorf("下载的升级文件为空")
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("同步升级文件失败: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("关闭升级文件失败: %w", err)
 	}
 
 	// 赋予可执行权限

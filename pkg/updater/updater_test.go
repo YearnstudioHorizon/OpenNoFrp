@@ -1,6 +1,25 @@
 package updater
 
-import "testing"
+import (
+	"fmt"
+	"runtime"
+	"testing"
+)
+
+func TestFindMatchingAssetExcludesArchives(t *testing.T) {
+	name := fmt.Sprintf("opennofrp-server-%s-%s", runtime.GOOS, runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	assets := []ReleaseAsset{{Name: name + ".zip", BrowserDownloadURL: "archive"}, {Name: name + ".sha256", BrowserDownloadURL: "checksum"}, {Name: name, BrowserDownloadURL: "binary"}}
+	var info UpdateInfo
+	if got := info.FindMatchingAsset("opennofrp-server", assets); got != "binary" {
+		t.Fatalf("selected asset: %s", got)
+	}
+	if got := info.FindMatchingAsset("opennofrp-server", assets[:2]); got != "" {
+		t.Fatalf("selected non-binary asset: %s", got)
+	}
+}
 
 func TestCompareVersions(t *testing.T) {
 	tests := []struct {
