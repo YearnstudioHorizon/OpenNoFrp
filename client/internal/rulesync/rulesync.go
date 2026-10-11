@@ -200,7 +200,7 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 	// 每个连接都重新执行 DetectPortOwner 很重要，因为 Docker 容器重启后
 	// 其 PID 会改变（/proc/<pid>/ns/net 也随之不同），否则过期的 PID
 	// 会悄无声息地进入已失效的命名空间。
-	owner, err := envcheck.DetectPortOwner(rule.LocalPort)
+	owner, err := envcheck.DetectPortOwner(rule.LocalPort, rule.LocalIP)
 	if err != nil {
 		r.Logger.Warn("cannot determine port owner, falling back to plain forwarding",
 			"rule", rule.Name, "port", rule.LocalPort, "error", err)
@@ -254,6 +254,9 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 		// 该 goroutine 必须在调用 socket() 之前以 runtime.LockOSThread 的方式
 		// Enter() 此 netns。
 		containerIP := net.ParseIP("127.0.0.1")
+		if owner.TargetIP != "" {
+			containerIP = net.ParseIP(owner.TargetIP)
+		}
 		containerPort := rule.LocalPort
 		if owner.TargetPort != 0 {
 			containerPort = owner.TargetPort

@@ -30,7 +30,10 @@ func (r *Reconciler) dialSpoofedUDP(ctx context.Context, rule protocol.Rule, met
 	dialer := tproxy.SpoofedDialer{FWMark: sharedFWMark}
 
 	// Probe UDP independently; TCP on the same port may belong to another netns.
-	owner, err := envcheck.DetectUDPPortOwner(rule.LocalPort)
+	owner, err := envcheck.DetectUDPPortOwner(rule.LocalPort, rule.LocalIP)
+	if err != nil {
+		return nil, fmt.Errorf("detect UDP port owner: %w", err)
+	}
 	if err == nil && owner.Kind == envcheck.OwnerDockerBridgeNetwork {
 		cns := netnsworker.ContainerNetns{PID: owner.PID}
 		if err := r.ensureNetnsReady(cns); err != nil {
@@ -42,6 +45,10 @@ func (r *Reconciler) dialSpoofedUDP(ctx context.Context, rule protocol.Rule, met
 		}
 		ch := make(chan result, 1)
 		containerPort := rule.LocalPort
+		containerIP := net.ParseIP("127.0.0.1")
+		if owner.TargetIP != "" {
+			containerIP = net.ParseIP(owner.TargetIP)
+		}
 		if owner.TargetPort != 0 {
 			containerPort = owner.TargetPort
 		}
@@ -50,7 +57,7 @@ func (r *Reconciler) dialSpoofedUDP(ctx context.Context, rule protocol.Rule, met
 				ch <- result{nil, fmt.Errorf("enter container netns: %w", err)}
 				return
 			}
-			c, err := dialer.DialSpoofedUDP(ctx, meta.ClientAddr, meta.ClientPort, net.ParseIP("127.0.0.1"), containerPort)
+			c, err := dialer.DialSpoofedUDP(ctx, meta.ClientAddr, meta.ClientPort, containerIP, containerPort)
 			ch <- result{c, err}
 		}()
 		res := <-ch

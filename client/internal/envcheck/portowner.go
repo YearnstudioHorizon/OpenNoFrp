@@ -51,6 +51,7 @@ type PortOwnerInfo struct {
 	Kind          PortOwnerKind
 	PID           int
 	TargetPort    uint16 // container-side port for Docker mappings
+	TargetIP      string // container interface address for published mappings
 	ProcessName   string
 	ContainerID   string // 仅在端口归属 Docker 时设置
 	ContainerName string // 仅在端口归属 Docker 时设置，需要 `docker` CLI
@@ -87,48 +88,37 @@ func firstNonEmpty(ss ...string) string {
 //
 // 该函数完全只读：它解析 /proc/net/tcp[6] 和 /proc/<pid>/cgroup，并可选地调用
 // `docker inspect`（同样只读）来解析便于阅读的容器名称。它从不修改任何内容。
-func DetectPortOwner(port uint16) (PortOwnerInfo, error) {
-	return detectPortOwner(port, "tcp")
+func DetectPortOwner(port uint16, localIP ...string) (PortOwnerInfo, error) {
+	return detectPortOwner(port, "tcp", localIP...)
 }
 
 // DetectUDPPortOwner detects UDP sockets independently of TCP on the same port.
-func DetectUDPPortOwner(port uint16) (PortOwnerInfo, error) {
-	return detectPortOwner(port, "udp")
+func DetectUDPPortOwner(port uint16, localIP ...string) (PortOwnerInfo, error) {
+	return detectPortOwner(port, "udp", localIP...)
 }
 
-func detectPortOwner(port uint16, transport string) (PortOwnerInfo, error) {
+func detectPortOwner(port uint16, transport string, localIP ...string) (PortOwnerInfo, error) {
+	info, found, dockerErr := inspectPublishedPort(port, transport, localIP...)
+	if dockerErr != nil {
+		return PortOwnerInfo{Kind: OwnerUnknown}, dockerErr
+	}
+	if found {
+		return info, nil
+	}
 	pid, err := findListeningPID(port, transport)
 	if err != nil {
 		return PortOwnerInfo{Kind: OwnerUnknown}, err
 	}
 	if pid == 0 {
-		if cid, statePID, name, targetPort := findContainerPublishingPort(port, transport); cid != "" {
-			return PortOwnerInfo{Kind: OwnerDockerBridgeNetwork, PID: statePID, ContainerID: cid, ContainerName: name, TargetPort: targetPort}, nil
-		}
 		return PortOwnerInfo{Kind: OwnerUnknown}, fmt.Errorf("no process found listening on port %d", port)
 	}
 
-	info := PortOwnerInfo{PID: pid}
+	info = PortOwnerInfo{PID: pid}
 	info.ProcessName = processName(pid)
 
 	containerID, inHostNetns := dockerCgroupInfo(pid)
 	if containerID == "" {
-		// 监听进程本身不在容器中。当 Docker 守护进程侧的辅助程序——dockerd、
-		// containerd 或 docker-proxy——持有宿主机侧发布的端口时，这正是预期的
-		// 情况。此时询问 Docker 实际是谁发布了该端口，并改为按容器的进程进行
-		// 分类。
-		if cid, statePID, containerName, targetPort := findContainerPublishingPort(port, transport); cid != "" {
-			info.ContainerID = cid
-			info.ContainerName = containerName
-			info.PID = statePID
-			info.TargetPort = targetPort
-			if inHostNetnsOf(statePID) {
-				info.Kind = OwnerDockerHostNetwork
-			} else {
-				info.Kind = OwnerDockerBridgeNetwork
-			}
-			return info, nil
-		}
+		// Published Docker mappings were checked above before inspecting host sockets.
 		info.Kind = OwnerHostProcess
 		return info, nil
 	}
@@ -142,55 +132,6 @@ func detectPortOwner(port uint16, transport string) (PortOwnerInfo, error) {
 		info.Kind = OwnerDockerBridgeNetwork
 	}
 	return info, nil
-}
-
-// inHostNetnsOf 报告 /proc/<pid> 的网络命名空间是否就是宿主机自身的 netns
-// （PID 1 的 netns）。
-func inHostNetnsOf(pid int) bool {
-	selfNetns, err1 := os.Readlink(fmt.Sprintf("/proc/%d/ns/net", pid))
-	hostNetns, err2 := os.Readlink("/proc/1/ns/net")
-	return err1 == nil && err2 == nil && selfNetns == hostNetns
-}
-
-// findContainerPublishingPort 解析 `docker ps --no-trunc` 的输出，查找其 PORTS
-// 列发布了给定宿主机 TCP 端口的容器，然后通过 docker inspect 解析该容器的 init
-// PID 和友好名称。运行 docker-proxy 的 Docker 守护进程（或者越来越常见的、没有
-// 单独 docker-proxy 的情况——由 dockerd/containerd 直接绑定发布的 TCP socket）
-// 会把宿主机侧的监听 socket 放在宿主机 netns 中，因此监听 PID 不带任何 /docker/
-// cgroup 线索，纯粹基于 /proc 的检测无法对该端口分类。正是这个回退机制让
-// OwnerDockerBridgeNetwork 检测在这种极其常见的情况下得以工作。
-func findContainerPublishingPort(port uint16, transport string) (containerID string, statePID int, containerName string, targetPort uint16) {
-	out, err := exec.Command("docker", "ps", "--no-trunc").Output()
-	if err != nil {
-		return "", 0, "", 0
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 1 {
-			continue
-		}
-		candidate := fields[0]
-		// NAMES 列是最后一个字段；同时匹配实际的
-		// "0.0.0.0:<port>-><port>/tcp" 片段，而不是做子串匹配，以避免
-		// "80->" 与 "8080->" 之类的误判，例如要求数字前面是 ':' 或端口规格的
-		// 起始位置。
-		containerPort, ok := publishedContainerPort(line, port, transport)
-		if !ok {
-			continue
-		}
-		pidOut, err := exec.Command("docker", "inspect", "-f", "{{.State.Pid}}", candidate).Output()
-		if err != nil {
-			continue
-		}
-		statePID, _ = strconv.Atoi(strings.TrimSpace(string(pidOut)))
-		if statePID <= 0 {
-			continue
-		}
-		nameOut, _ := exec.Command("docker", "inspect", "-f", "{{.Name}}", candidate).Output()
-		containerName = strings.TrimPrefix(strings.TrimSpace(string(nameOut)), "/")
-		return candidate, statePID, containerName, containerPort
-	}
-	return "", 0, "", 0
 }
 
 // findListeningPID 扫描 /proc/net/tcp 和 /proc/net/tcp6，查找给定端口上处于
@@ -375,25 +316,4 @@ func dockerContainerName(containerID string) string {
 		return ""
 	}
 	return strings.TrimPrefix(strings.TrimSpace(string(out)), "/")
-}
-
-// publishedContainerPort returns the container-side port for a matching Docker mapping.
-func publishedContainerPort(line string, port uint16, transport string) (uint16, bool) {
-	for _, field := range strings.Fields(line) {
-		for _, field := range strings.Split(field, ",") {
-			mapping := strings.SplitN(strings.TrimSpace(field), "->", 2)
-			if len(mapping) != 2 || !strings.HasSuffix(mapping[1], "/"+transport) {
-				continue
-			}
-			colon := strings.LastIndex(mapping[0], ":")
-			if colon < 0 || mapping[0][colon+1:] != strconv.Itoa(int(port)) {
-				continue
-			}
-			n, err := strconv.ParseUint(strings.TrimSuffix(mapping[1], "/"+transport), 10, 16)
-			if err == nil && n > 0 {
-				return uint16(n), true
-			}
-		}
-	}
-	return 0, false
 }
