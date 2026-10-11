@@ -99,9 +99,6 @@ func DetectUDPPortOwner(port uint16, localIP ...string) (PortOwnerInfo, error) {
 
 func detectPortOwner(port uint16, transport string, localIP ...string) (PortOwnerInfo, error) {
 	info, found, dockerErr := inspectPublishedPort(port, transport, localIP...)
-	if dockerErr != nil {
-		return PortOwnerInfo{Kind: OwnerUnknown}, dockerErr
-	}
 	if found {
 		return info, nil
 	}
@@ -110,6 +107,9 @@ func detectPortOwner(port uint16, transport string, localIP ...string) (PortOwne
 		return PortOwnerInfo{Kind: OwnerUnknown}, err
 	}
 	if pid == 0 {
+		if dockerErr != nil {
+			return PortOwnerInfo{Kind: OwnerUnknown}, dockerErr
+		}
 		return PortOwnerInfo{Kind: OwnerUnknown}, fmt.Errorf("no process found listening on port %d", port)
 	}
 
@@ -119,6 +119,9 @@ func detectPortOwner(port uint16, transport string, localIP ...string) (PortOwne
 	containerID, inHostNetns := dockerCgroupInfo(pid)
 	if containerID == "" {
 		// Published Docker mappings were checked above before inspecting host sockets.
+		if dockerErr != nil && (info.ProcessName == "docker-proxy" || info.ProcessName == "dockerd" || info.ProcessName == "containerd" || info.ProcessName == "rootlesskit") {
+			return PortOwnerInfo{Kind: OwnerUnknown}, dockerErr
+		}
 		info.Kind = OwnerHostProcess
 		return info, nil
 	}
