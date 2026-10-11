@@ -191,59 +191,6 @@
   <div class="foot">OpenNoFrp · 纯用户态内网穿透</div>
 </main>
 
-<script>
-document.addEventListener('click', function (e) {
-  var b = e.target.closest('.copy');
-  if (!b) return;
-  var t = document.querySelector(b.dataset.copyTarget);
-  if (!t) return;
-  navigator.clipboard.writeText(t.innerText).then(function () {
-    var old = b.textContent;
-    b.textContent = '已复制';
-    b.classList.add('btn-primary');
-    setTimeout(function () { b.textContent = old; b.classList.remove('btn-primary'); }, 1600);
-  });
-});
-
-var btnUpdate = document.getElementById('btn-check-update');
-if (btnUpdate) {
-  btnUpdate.addEventListener('click', function() {
-    btnUpdate.disabled = true;
-    btnUpdate.textContent = '检查中...';
-    var alertBox = document.getElementById('update-alert');
-    alertBox.style.display = 'none';
-
-    fetch('/api/check-update')
-      .then(function(res) { return res.json(); })
-      .then(function(data) {
-        btnUpdate.disabled = false;
-        btnUpdate.textContent = '检查更新';
-        alertBox.style.display = 'block';
-        if (!data.ok) {
-          alertBox.className = 'alert alert-err';
-          alertBox.textContent = '检查更新失败: ' + (data.error || '未知错误');
-          return;
-        }
-        var info = data.info;
-        if (info.has_update) {
-          alertBox.className = 'alert alert-ok';
-          alertBox.innerHTML = '🎉 发现新版本 <strong>' + info.latest_version + '</strong> (当前: ' + info.current_version + ')！<br>' +
-            '可前往 GitHub 查看：<a href="' + info.release_url + '" target="_blank" style="text-decoration:underline;">' + info.release_url + '</a><br>' +
-            '服务器端一键更新命令：<code>sudo opennofrp-server update</code>';
-        } else {
-          alertBox.className = 'alert alert-ok';
-          alertBox.textContent = '当前已是最新版本 (' + info.current_version + ')';
-        }
-      })
-      .catch(function(err) {
-        btnUpdate.disabled = false;
-        btnUpdate.textContent = '检查更新';
-        alertBox.style.display = 'block';
-        alertBox.className = 'alert alert-err';
-        alertBox.textContent = '请求异常: ' + err.message;
-      });
-  });
-}
-</script>
+<script src="/static/actions.js" defer></script>
 </body>
 </html>
