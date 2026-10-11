@@ -1,0 +1,36 @@
+{{define "theme-head"}}
+<meta name="color-scheme" content="light dark">
+<script>try{document.documentElement.dataset.theme=localStorage.getItem('opennofrp-theme')==='dark'?'dark':'light'}catch(e){document.documentElement.dataset.theme='light'}</script>
+<script src="/static/app.js" defer></script>
+{{end}}
+
+{{define "app-shell"}}
+<a class="skip-link" href="#main-content">跳至主要内容</a>
+<aside class="sidebar" id="app-sidebar" aria-label="主导航">
+  <a class="sidebar-brand" href="/"><span class="brand-mark" aria-hidden="true">↗</span><span>OpenNoFrp<small>内网穿透工作空间</small></span></a>
+  <div class="nav-label">工作空间</div>
+  <nav>
+    <a href="/" data-nav="overview"><span aria-hidden="true">▦</span>概览</a>
+    <a href="/#clients" data-nav="clients"><span aria-hidden="true">▤</span>内网机器</a>
+    <a href="/#onboard" data-nav="onboard"><span aria-hidden="true">＋</span>接入新机器</a>
+    <div class="nav-label">管理</div>
+    <a href="/#reserved" data-nav="reserved"><span aria-hidden="true">◇</span>保留端口</a>
+    <a href="/#api-tokens" data-nav="api-tokens"><span aria-hidden="true">⌘</span>API 令牌</a>
+    <a href="/#account" data-nav="account"><span aria-hidden="true">◎</span>账号设置</a>
+  </nav>
+  <div class="sidebar-bottom"><span class="status-dot"></span>自托管 · 数据由你掌控<small>让内网服务，安全连接世界。</small></div>
+</aside>
+<header class="topbar">
+  <button class="btn btn-ghost mobile-menu" type="button" aria-label="打开导航" aria-expanded="false" aria-controls="app-sidebar">☰</button>
+  <div class="breadcrumbs">工作空间 <span>/</span> <strong id="page-location">概览</strong></div>
+  <div class="spacer"></div>
+  <button class="btn btn-ghost theme-toggle" type="button" aria-label="切换深色主题">◐ <span>深色模式</span></button>
+  <span class="admin-avatar" aria-hidden="true">A</span>
+  <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="btn btn-ghost btn-sm" type="submit">退出登录</button></form>
+</header>
+<div class="nav-overlay" hidden></div>
+<dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description">
+  <div class="dialog-icon" aria-hidden="true">!</div><h2 id="confirm-title">确认操作</h2><p id="confirm-description"></p>
+  <div class="dialog-actions"><button class="btn" type="button" id="confirm-cancel" autofocus>取消</button><button class="btn btn-danger" type="button" id="confirm-accept">确认继续</button></div>
+</dialog>
+{{end}}

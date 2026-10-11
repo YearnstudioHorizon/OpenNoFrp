@@ -6,20 +6,13 @@
 <title>{{.Client.Name}} · OpenNoFrp</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='1' y='1' width='22' height='22' rx='6' fill='%234f8cff'/%3E%3Cpath d='M7 12h9m-4-4 4 4-4 4' stroke='%23fff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
+{{template "theme-head" .}}
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand">
-    <svg class="logo" viewBox="0 0 24 24"><rect x="1" y="1" width="22" height="22" rx="6" fill="#4f8cff"/><path d="M7 12h9m-4-4 4 4-4 4" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    <a href="/">OpenNoFrp</a><span class="sub">控制台</span>
-  </div>
-  <div class="spacer"></div>
-  <nav><a href="/">← 返回列表</a></nav>
-  <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{$.CSRF}}"><button class="btn btn-ghost btn-sm" type="submit">退出登录</button></form>
-</header>
+{{template "app-shell" .}}
 
-<main class="container">
+<main class="container" id="main-content">
 
   <a class="back" href="/">&larr; 返回内网机器列表</a>
 
@@ -33,11 +26,12 @@
       <div class="hint"><span class="tag-id">{{.Client.ID}}</span> &nbsp;·&nbsp; 最近心跳：{{.Client.LastSeen}}</div>
     </div>
     <div class="btn-row">
+      <a class="btn btn-primary" href="#rule-form">＋ 新建规则</a>
       <form class="inline" method="post" action="/clients/{{.Client.ID}}/rename"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
         <input name="name" value="{{.Client.Name}}" style="width:170px;display:inline-block" aria-label="机器名称">
         <button class="btn btn-sm" type="submit" style="margin-left:6px">重命名</button>
       </form>
-      <form class="inline" method="post" action="/clients/{{.Client.ID}}/delete" onsubmit="return confirm('确定删除这台机器及其全部转发规则？此操作不可恢复。')"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      <form class="inline" method="post" action="/clients/{{.Client.ID}}/delete" data-confirm="确定删除这台机器及其全部转发规则？此操作不可恢复。"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
         <button class="btn btn-danger btn-sm" type="submit">删除机器</button>
       </form>
     </div>
@@ -47,17 +41,22 @@
   {{if .Notice}}<div class="alert alert-ok">{{.Notice}}</div>{{end}}
   {{if .Outdated}}<div class="alert alert-err">这台机器的 Client 版本过旧（{{if .ClientVersion}}{{.ClientVersion}}{{else}}未知版本{{end}}），不支持 HTTP 规则所需的拨号确认，HTTP 规则将直接返回“服务不可用”页面。请在该机器上执行 <code>opennofrp-client update</code> 升级。</div>{{end}}
 
-  <section class="card">
+  <section class="card" id="rules">
     <h2>转发规则</h2>
     <p class="desc">启用中的规则会在服务器上开放对应公网端口，并实时同步到这台内网机器。多条 HTTP 规则可以按域名 / 路径共享同一个公网端口。</p>
+    <div class="table-toolbar">
+      <div class="search-box"><input type="search" aria-label="搜索转发规则" placeholder="搜索规则、协议或地址" data-table-search="#rules-table" data-state-filter="#rule-state" data-search-count="#rule-result-count"></div>
+      <select id="rule-state" aria-label="规则状态"><option value="">全部状态</option><option value="enabled">启用</option><option value="disabled">停用</option></select>
+      <span class="result-count" id="rule-result-count" aria-live="polite"></span>
+    </div>
     <div class="table-wrap">
-      <table>
+      <table id="rules-table">
         <thead>
           <tr><th>ID</th><th>名称</th><th>协议</th><th>本地地址</th><th>公网入口</th><th>源 IP 保留</th><th>状态</th><th style="width:200px">操作</th></tr>
         </thead>
         <tbody>
         {{range .Rules}}
-          <tr class="{{if not .Enabled}}disabled{{end}}">
+          <tr class="{{if not .Enabled}}disabled{{end}}" data-state="{{if .Enabled}}enabled{{else}}disabled{{end}}">
             <td>{{.ID}}</td>
             <td>{{.Name}}</td>
             <td>{{if eq .Protocol "http"}}<span class="badge badge-green">HTTP</span>{{else if eq .Protocol "tls"}}<span class="badge badge-amber">TLS</span>{{else if eq .Protocol "tcp+udp"}}<span class="badge badge-blue">TCP</span> <span class="badge badge-purple">UDP</span>{{else if eq .Protocol "udp"}}<span class="badge badge-purple">UDP</span>{{else}}<span class="badge badge-blue">TCP</span>{{end}}</td>
@@ -81,8 +80,8 @@
                 <form class="inline" method="post" action="/rules/{{.ID}}/toggle"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
                   <button class="btn btn-sm" type="submit">{{if .Enabled}}停用{{else}}启用{{end}}</button>
                 </form>
-                <form class="inline" method="post" action="/rules/{{.ID}}/delete" onsubmit="return confirm('确定删除该规则？公网入口将立即关闭。')"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
-                  <button class="btn btn-danger btn-sm" type="submit">删除</button>
+                <form class="inline" method="post" action="/rules/{{.ID}}/delete" data-confirm="确定删除该规则？公网入口将立即关闭。"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                <button class="btn btn-danger btn-sm" type="submit" aria-label="删除规则 {{.Name}}">删除</button>
                 </form>
               </div>
             </td>
@@ -145,19 +144,19 @@
           </div>
           <div class="field">
             <label for="f-lport">本地端口（内网机器上）</label>
-            <input id="f-lport" name="local_port" value="{{if $e}}{{$e.LocalPort}}{{else}}80{{end}}" inputmode="numeric" required>
-            <span class="help">内网机器上服务实际监听的端口</span>
+            <input id="f-lport" name="local_port" value="{{if $e}}{{$e.LocalPort}}{{else}}80{{end}}" type="number" min="1" max="65535" required>
+            <span class="help">普通服务填写监听端口；Docker 服务填写宿主机发布端口，内部端口会自动识别。</span>
           </div>
           <div class="field">
             <label for="f-rport">公网端口（服务器上）</label>
-            <input id="f-rport" name="remote_port" value="{{if $e}}{{$e.RemotePort}}{{else}}8080{{end}}" inputmode="numeric" required {{if $e}}data-touched="1"{{end}}>
+            <input id="f-rport" name="remote_port" value="{{if $e}}{{$e.RemotePort}}{{else}}8080{{end}}" type="number" min="1" max="65535" required {{if $e}}data-touched="1"{{end}}>
             <span class="help" data-proto-show="http">HTTP 规则可与其他 HTTP 规则共用同一端口（如 80）</span>
             <span class="help" data-proto-show="tls">TLS 透传规则可与其他 TLS 透传规则按 SNI 共用同一端口（如 443）</span>
             <span class="help" data-proto-show="tcp udp tcp+udp">服务器对外开放的端口，1–65535，由该规则独占</span>
           </div>
           <div class="field" data-proto-show="tcp udp tcp+udp">
             <label for="f-rportend">公网结束端口（端口段，可选）</label>
-            <input id="f-rportend" name="remote_port_end" value="{{if $e}}{{if $e.RemotePortEnd}}{{$e.RemotePortEnd}}{{end}}{{end}}" placeholder="留空 = 单端口" inputmode="numeric">
+            <input id="f-rportend" name="remote_port_end" value="{{if $e}}{{if $e.RemotePortEnd}}{{$e.RemotePortEnd}}{{end}}{{end}}" placeholder="留空 = 单端口" type="number" min="1" max="65535">
             <span class="help">填写后公网端口 起始..结束 依次映射到本地端口 本地端口..（如 10000-10099 → 20000-20099），最多 1000 个端口</span>
           </div>
 

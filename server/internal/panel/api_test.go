@@ -14,7 +14,7 @@ import (
 	"opennofrp/server/internal/store"
 )
 
-var apiTokenRe = regexp.MustCompile(`<pre id="apitoken">(onfr_[0-9a-f]+)</pre>`)
+var apiTokenRe = regexp.MustCompile(`<pre id="apitoken"[^>]*>(onfr_[0-9a-f]+)</pre>`)
 
 func apiDo(t *testing.T, method, u, token, body string) (int, map[string]any) {
 	t.Helper()

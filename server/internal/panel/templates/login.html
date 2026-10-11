@@ -6,29 +6,35 @@
 <title>登录 · OpenNoFrp</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='1' y='1' width='22' height='22' rx='6' fill='%234f8cff'/%3E%3Cpath d='M7 12h9m-4-4 4 4-4 4' stroke='%23fff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
+{{template "theme-head" .}}
 </head>
 <body>
+<button class="btn btn-ghost theme-toggle login-theme" type="button" aria-label="切换深色主题">◐ <span>深色模式</span></button>
 <div class="login-wrap">
+  <section class="login-story">
+    <a class="sidebar-brand" href="/" style="margin:0"><span class="brand-mark" aria-hidden="true">↗</span><span>OpenNoFrp<small>内网穿透工作空间</small></span></a>
+    <h2>你的内网服务，<br><span>连接更大的世界。</span></h2>
+    <p>在一个工作空间里连接机器、配置转发、管理访问。让每一次连接都清楚可见。</p>
+    <div class="login-features"><span>多协议转发</span><span>保留来源 IP</span><span>自托管部署</span></div>
+  </section>
   <div class="login-card">
-    <div class="login-brand">
-      <svg class="logo" viewBox="0 0 24 24"><rect x="1" y="1" width="22" height="22" rx="6" fill="#4f8cff"/><path d="M7 12h9m-4-4 4 4-4 4" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <h1>OpenNoFrp</h1>
-    </div>
-    <p class="login-sub">内网穿透控制台 · 请使用管理员账号登录</p>
+    <div class="eyebrow">WELCOME BACK</div><h1>登录工作空间</h1>
+    <p class="login-sub">使用管理员账号，继续管理你的内网服务。</p>
 
     {{if .Error}}<div class="alert alert-err">{{.Error}}</div>{{end}}
 
     <form method="post" action="/login">
       <div class="field">
         <label for="username">用户名</label>
-        <input id="username" name="username" placeholder="admin" autocomplete="username" autofocus>
+        <input id="username" name="username" placeholder="输入管理员用户名" autocomplete="username" required autofocus>
       </div>
       <div class="field">
         <label for="password">密码</label>
-        <input id="password" name="password" type="password" placeholder="••••••••" autocomplete="current-password">
+        <input id="password" name="password" type="password" placeholder="输入密码" autocomplete="current-password" required>
       </div>
-      <button class="btn btn-primary" type="submit">登 录</button>
+      <button class="btn btn-primary" type="submit">登录工作空间 →</button>
     </form>
+    <p class="login-note">管理员凭据由部署者设置 · OpenNoFrp</p>
   </div>
 </div>
 </body>
