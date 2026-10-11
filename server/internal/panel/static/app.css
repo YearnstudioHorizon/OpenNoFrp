@@ -546,3 +546,10 @@ textarea { line-height: 1.7; }
   .connection-preview { padding: 12px; font-size: 10px; }
 }
 @media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+.page-security .security-card { max-width: 900px; }
+.captcha-image-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.captcha-image-row img { border: 1px solid var(--border); border-radius: 8px; max-width: 100%; }
+#captcha-settings > .field { max-width: 400px; margin-bottom: 20px; }
+#captcha-settings > [data-captcha-settings] { margin-top: 20px; }
+#captcha-widget { min-height: 50px; }

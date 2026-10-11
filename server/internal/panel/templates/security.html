@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>安全设置 · OpenNoFrp</title>
+<link rel="stylesheet" href="/static/app.css">
+{{template "theme-head" .}}
+<script src="/static/captcha.js" defer></script>
+</head>
+<body data-page="security" data-page-title="安全设置">
+{{template "app-shell" .}}
+<main class="container page-security" id="main-content">
+  <div class="page-hero"><div><div class="eyebrow">SECURITY</div><h1>安全设置</h1><p class="page-description">为管理面板登录增加一道验证。</p></div></div>
+  {{if .Error}}<div class="alert alert-err">{{.Error}}</div>{{end}}
+  {{if .Notice}}<div class="alert alert-ok">{{.Notice}}</div>{{end}}
+  <section class="card security-card">
+    <h2>登录人机验证</h2><p class="desc">选择一种验证方式。保存后，下次登录生效；当前会话可以继续使用。</p>
+    <form method="post" action="/security/captcha" id="captcha-settings">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <div class="field"><label for="captcha-provider">验证方式</label>
+        <select id="captcha-provider" name="provider">
+          <option value="none" {{if eq .Settings.Provider "none"}}selected{{end}}>关闭人机验证</option>
+          <option value="builtin" {{if eq .Settings.Provider "builtin"}}selected{{end}}>内建图片验证码</option>
+          <option value="fcaptcha" {{if eq .Settings.Provider "fcaptcha"}}selected{{end}}>fCaptcha · 自部署实例</option>
+          <option value="geetest" {{if eq .Settings.Provider "geetest"}}selected{{end}}>GEETEST · 极验 v4</option>
+        </select>
+      </div>
+      <div data-captcha-settings="none"><p class="wizard-tip">登录仍会检查账号密码，并保留失败次数限制。</p></div>
+      <div data-captcha-settings="builtin"><p class="wizard-tip">本机生成五位数字图片，无需外部服务。验证码三分钟过期，每次提交后失效。</p></div>
+      <div data-captcha-settings="fcaptcha" class="form-grid">
+        <div class="field span-all"><label for="fcaptcha-url">实例地址</label><input id="fcaptcha-url" name="fcaptcha_url" type="text" inputmode="url" value="{{.Settings.FCaptchaURL}}" placeholder="https://captcha.example.com" maxlength="2048"><span class="help">填写实例根地址；访问面板的浏览器和本服务器都需要能访问。HTTPS 面板请使用 HTTPS 实例，并在实例配置中允许面板域名。</span></div>
+        <div class="field"><label for="fcaptcha-site-key">Site Key</label><input id="fcaptcha-site-key" name="fcaptcha_site_key" value="{{.Settings.SiteKey}}" maxlength="512" autocomplete="off"></div>
+        <div class="field"><label for="fcaptcha-secret">Secret</label><input id="fcaptcha-secret" name="fcaptcha_secret" type="password" maxlength="2048" autocomplete="new-password" placeholder="{{if .HasFCaptchaSecret}}已设置，留空保留{{else}}填写服务端验证密钥{{end}}"><span class="help">密钥不会显示在登录页，也不会回显。</span></div>
+        <p class="help span-all">适用于 WebDecoy/FCaptcha。浏览器加载实例的 /fcaptcha.js，服务器调用 /api/token/verify。</p>
+      </div>
+      <div data-captcha-settings="geetest" class="form-grid">
+        <div class="field"><label for="geetest-id">Captcha ID</label><input id="geetest-id" name="geetest_id" value="{{.Settings.GeetestID}}" maxlength="512" autocomplete="off"></div>
+        <div class="field"><label for="geetest-key">Captcha Key</label><input id="geetest-key" name="geetest_key" type="password" maxlength="2048" autocomplete="new-password" placeholder="{{if .HasGeetestKey}}已设置，留空保留{{else}}填写极验后台的验证密钥{{end}}"></div>
+        <p class="help span-all">使用极验 v4，在极验后台获取 ID 和 Key，并配置面板域名。浏览器和服务器需要能访问极验服务。</p>
+      </div>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">保存验证设置</button></div>
+    </form>
+  </section>
+</main>
+</body>
+</html>

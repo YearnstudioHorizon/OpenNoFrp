@@ -57,6 +57,9 @@ func main() {
 		case "init-config":
 			runInitConfig()
 			return
+		case "reset-captcha":
+			runResetCaptcha()
+			return
 		}
 	}
 	runServer()

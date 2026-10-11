@@ -73,8 +73,11 @@ type Panel struct {
 
 	tmpl *template.Template
 
-	mu            sync.Mutex
-	loginAttempts map[string]*loginAttempt // IP -> 登录失败限速
+	mu                sync.Mutex
+	loginAttempts     map[string]*loginAttempt // IP -> 登录失败限速
+	captchaChallenges map[string]captchaChallenge
+	captchaUsed       map[string]time.Time
+	captchaHTTP       *http.Client
 }
 
 func New(st *store.Store, logger *slog.Logger, onRules OnRulesChanged, baseURL, controlHost string, controlPort int, fingerprint, clientBinDir string) *Panel {
@@ -101,7 +104,10 @@ func New(st *store.Store, logger *slog.Logger, onRules OnRulesChanged, baseURL, 
 		Store: st, Logger: logger, OnRules: onRules,
 		BaseURL: baseURL, ControlHost: controlHost, ControlPort: controlPort,
 		Fingerprint: fingerprint, ClientBinDir: clientBinDir, tmpl: tpl,
-		loginAttempts: map[string]*loginAttempt{},
+		loginAttempts:     map[string]*loginAttempt{},
+		captchaChallenges: map[string]captchaChallenge{},
+		captchaUsed:       map[string]time.Time{},
+		captchaHTTP:       &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 }
 
@@ -110,6 +116,7 @@ func (p *Panel) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /login", p.handleLoginGet)
 	mux.HandleFunc("POST /login", p.handleLoginPost)
+	mux.HandleFunc("GET /captcha/image", p.handleCaptchaImage)
 	mux.HandleFunc("POST /logout", p.handleLogout)
 
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
@@ -146,6 +153,8 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("POST /reserved/add", auth(p.handleAddReserved))
 	mux.HandleFunc("POST /reserved/remove", auth(p.handleRemoveReserved))
 	mux.HandleFunc("POST /admin/password", auth(p.handleChangePassword))
+	mux.HandleFunc("GET /security", auth(p.handleSecurityGet))
+	mux.Handle("POST /security/captcha", http.MaxBytesHandler(auth(p.handleCaptchaSettings), 16<<10))
 	mux.HandleFunc("GET /api/check-update", auth(p.handleCheckUpdate))
 	// /metrics 自行鉴权：面板登录会话或 Bearer MetricsToken。
 	mux.HandleFunc("GET /metrics", p.handleMetrics)
@@ -233,11 +242,15 @@ func (p *Panel) setSessionCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Panel) handleLoginGet(w http.ResponseWriter, r *http.Request) {
-	p.tmpl.ExecuteTemplate(w, "login.html", nil)
+	p.renderLogin(w, r, "")
 }
 
 func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "登录请求无效", http.StatusBadRequest)
+		return
+	}
 
 	// 1. 获取客户端来源 IP 进行限速与防爆破防御
 	clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -255,10 +268,20 @@ func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	if now.Before(attempt.lockedUntil) {
 		p.mu.Unlock()
 		w.WriteHeader(http.StatusTooManyRequests)
-		p.tmpl.ExecuteTemplate(w, "login.html", map[string]any{"Error": "登录失败次数过多，账号已临时锁定，请 30 秒后再试"})
+		p.renderLogin(w, r, "登录失败次数过多，账号已临时锁定，请 30 秒后再试")
 		return
 	}
 	p.mu.Unlock()
+	if err := p.verifyCaptcha(r); err != nil {
+		p.mu.Lock()
+		attempt.failedCount++
+		if attempt.failedCount >= 5 {
+			attempt.lockedUntil = time.Now().Add(30 * time.Second)
+		}
+		p.mu.Unlock()
+		p.renderLogin(w, r, "人机验证未通过或服务暂时不可用，请重新验证")
+		return
+	}
 
 	// 2. 校验管理员账密 (store 内部恒定执行一次 bcrypt)
 	okAuth, err := p.Store.VerifyAdmin(r.Context(), r.FormValue("username"), r.FormValue("password"))
@@ -275,7 +298,7 @@ func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		// 防御暴力破解延时惩罚 (300ms)
 		time.Sleep(300 * time.Millisecond)
 
-		p.tmpl.ExecuteTemplate(w, "login.html", map[string]any{"Error": friendlyMsg("invalid credentials")})
+		p.renderLogin(w, r, friendlyMsg("invalid credentials"))
 		return
 	}
 

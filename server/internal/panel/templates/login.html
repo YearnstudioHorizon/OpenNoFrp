@@ -7,6 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='1' y='1' width='22' height='22' rx='6' fill='%234f8cff'/%3E%3Cpath d='M7 12h9m-4-4 4 4-4 4' stroke='%23fff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
 {{template "theme-head" .}}
+<script src="/static/captcha.js" defer></script>
 </head>
 <body>
 <button class="btn btn-ghost theme-toggle login-theme" type="button" aria-label="切换深色主题">◐ <span>深色模式</span></button>
@@ -23,7 +24,7 @@
 
     {{if .Error}}<div class="alert alert-err">{{.Error}}</div>{{end}}
 
-    <form method="post" action="/login">
+    <form method="post" action="/login" id="login-form">
       <div class="field">
         <label for="username">用户名</label>
         <input id="username" name="username" placeholder="输入管理员用户名" autocomplete="username" required autofocus>
@@ -32,6 +33,19 @@
         <label for="password">密码</label>
         <input id="password" name="password" type="password" placeholder="输入密码" autocomplete="current-password" required>
       </div>
+      {{if eq .Captcha.Provider "builtin"}}
+      <div class="field"><label for="captcha-answer">图片验证码</label>
+        <div class="captcha-image-row"><img id="captcha-image" src="/captcha/image" width="200" height="64" alt="五位数字验证码"><button class="btn btn-sm" id="captcha-refresh" type="button">换一张</button></div>
+        <input id="captcha-answer" name="captcha_answer" placeholder="输入图片中的五位数字" inputmode="numeric" autocomplete="off" pattern="[0-9]{5}" maxlength="5" required>
+        <span id="captcha-status" class="help" role="status">三分钟内有效，点击“换一张”可刷新。</span>
+      </div>
+      {{else if or (eq .Captcha.Provider "fcaptcha") (eq .Captcha.Provider "geetest")}}
+      <div class="field" id="captcha-config" data-provider="{{.Captcha.Provider}}" data-instance="{{.Captcha.FCaptchaURL}}" data-site-key="{{.Captcha.SiteKey}}" data-geetest-id="{{.Captcha.GeetestID}}">
+        <label>人机验证</label><div id="captcha-widget"></div><p id="captcha-status" class="help" role="status">正在加载验证…</p>
+        <input type="hidden" name="captcha_token"><input type="hidden" name="lot_number"><input type="hidden" name="captcha_output"><input type="hidden" name="pass_token"><input type="hidden" name="gen_time">
+      </div>
+      <noscript><p class="alert alert-err">此验证方式需要启用 JavaScript。</p></noscript>
+      {{end}}
       <button class="btn btn-primary" type="submit">登录工作空间 →</button>
     </form>
     <p class="login-note">管理员凭据由部署者设置 · OpenNoFrp</p>
