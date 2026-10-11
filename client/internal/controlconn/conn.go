@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -91,7 +92,7 @@ func (c *Client) Run(ctx context.Context) {
 }
 
 func (c *Client) runOnce(ctx context.Context) error {
-	addr := fmt.Sprintf("%s:%d", c.Cfg.Server.Addr, c.Cfg.Server.Port)
+	addr := net.JoinHostPort(c.Cfg.Server.Addr, strconv.Itoa(c.Cfg.Server.Port))
 	c.Logger.Info("connecting to server (TLS encrypted)", "addr", addr)
 
 	configPath := os.Getenv("OPENNOFRP_CLIENT_CONFIG")
@@ -114,12 +115,17 @@ func (c *Client) runOnce(ctx context.Context) error {
 
 	tlsConfig := tlsutil.NewClientTLSConfig(expectedFP, onFirstSeen)
 
-	var d net.Dialer
+	d := net.Dialer{Timeout: 15 * time.Second}
 	rawConn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("controlconn: dial %s: %w", addr, err)
 	}
 	defer rawConn.Close()
+	stopClose := context.AfterFunc(ctx, func() { _ = rawConn.Close() })
+	defer stopClose()
+	if err := rawConn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return err
+	}
 
 	tlsConn := tls.Client(rawConn, tlsConfig)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
@@ -128,6 +134,9 @@ func (c *Client) runOnce(ctx context.Context) error {
 	conn := net.Conn(tlsConn)
 
 	if err := c.handshakeOrRegister(conn); err != nil {
+		return err
+	}
+	if err := rawConn.SetDeadline(time.Time{}); err != nil {
 		return err
 	}
 
@@ -148,15 +157,15 @@ func (c *Client) runOnce(ctx context.Context) error {
 
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
 	defer cancelHeartbeat()
-	go c.heartbeatLoop(heartbeatCtx, ctrlStream)
-	go c.rulesLoop(ctx, ctrlStream)
+	go func() { c.heartbeatLoop(heartbeatCtx, ctrlStream); _ = session.Close() }()
+	go func() { c.rulesLoop(heartbeatCtx, ctrlStream); _ = session.Close() }()
 
 	for {
 		stream, err := session.AcceptStream()
 		if err != nil {
 			return fmt.Errorf("controlconn: session ended: %w", err)
 		}
-		go c.serveStream(ctx, stream)
+		go c.serveStream(heartbeatCtx, stream)
 	}
 }
 
