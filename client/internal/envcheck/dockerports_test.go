@@ -1,9 +1,22 @@
 package envcheck
 
 import (
+	"net"
 	"strings"
 	"testing"
 )
+
+func TestLocalDockerTarget(t *testing.T) {
+	addresses := []net.Addr{&net.IPNet{IP: net.ParseIP("192.0.2.10"), Mask: net.CIDRMask(24, 32)}}
+	for _, tc := range []struct {
+		ip   string
+		want bool
+	}{{"127.0.0.1", true}, {"::1", true}, {"192.0.2.10", true}, {"::ffff:192.0.2.10", true}, {"192.0.2.11", false}} {
+		if got := isLocalDockerTarget(net.ParseIP(tc.ip), addresses); got != tc.want {
+			t.Fatalf("%s: %v, want %v", tc.ip, got, tc.want)
+		}
+	}
+}
 
 func TestPublishedPortFromInspect(t *testing.T) {
 	const fixture = `[

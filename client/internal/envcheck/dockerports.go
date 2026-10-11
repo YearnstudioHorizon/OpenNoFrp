@@ -29,6 +29,21 @@ type dockerContainer struct {
 
 // Inspect returns individual bindings even when docker ps collapses port ranges.
 func inspectPublishedPort(port uint16, transport string, localIP ...string) (PortOwnerInfo, bool, error) {
+	// Wildcard publications belong to this host, not arbitrary LAN backends
+	// that happen to use the same port.
+	if len(localIP) > 0 {
+		target := net.ParseIP(localIP[0])
+		if target == nil || target.IsUnspecified() {
+			return PortOwnerInfo{}, false, fmt.Errorf("Docker target must be a concrete IP: %q", localIP[0])
+		}
+		addresses, err := net.InterfaceAddrs()
+		if err != nil {
+			return PortOwnerInfo{}, false, fmt.Errorf("list local interface addresses: %w", err)
+		}
+		if !isLocalDockerTarget(target, addresses) {
+			return PortOwnerInfo{}, false, nil
+		}
+	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		return PortOwnerInfo{}, false, nil
 	}
@@ -47,6 +62,18 @@ func inspectPublishedPort(port uint16, transport string, localIP ...string) (Por
 		return PortOwnerInfo{}, false, fmt.Errorf("docker inspect containers: %w", err)
 	}
 	return publishedPortFromInspect(data, port, transport, localIP...)
+}
+
+func isLocalDockerTarget(target net.IP, addresses []net.Addr) bool {
+	if target.IsLoopback() {
+		return true
+	}
+	for _, address := range addresses {
+		if local, ok := address.(*net.IPNet); ok && local.IP.Equal(target) {
+			return true
+		}
+	}
+	return false
 }
 
 func publishedPortFromInspect(data []byte, port uint16, transport string, localIP ...string) (PortOwnerInfo, bool, error) {
