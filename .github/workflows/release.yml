@@ -76,6 +76,13 @@ jobs:
           echo "Building ${SERVER_BIN}..."
           go build -ldflags="${LDFLAGS}" -o "dist/${SERVER_BIN}" ./server/cmd/opennofrp-server
 
+          VPN_BIN="opennofrp-vpn-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            VPN_BIN="${VPN_BIN}.exe"
+          fi
+          go build -ldflags="${LDFLAGS}" -o "dist/${VPN_BIN}" ./vpn/cmd/opennofrp-vpn
+          cp vpn/internal/network/assets/WINTUN-LICENSE.txt dist/WINTUN-LICENSE.txt
+
           # 2. 编译 Client (Linux 专享，依赖 Linux 原生 TPROXY/Netns 接口)
           if [ "${{ matrix.build_client }}" = "true" ]; then
             CLIENT_BIN="opennofrp-client-${{ matrix.goos }}-${{ matrix.goarch }}"
@@ -89,9 +96,9 @@ jobs:
           TAG="${{ steps.vars.outputs.tag }}"
           # 将压缩包直接生成在 dist 目录下，避免创建 packages 子目录导致后续 sha256sum * 报错
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip -9 "opennofrp-server-${TAG}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" opennofrp-server-*
+            zip -9 "opennofrp-server-${TAG}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" opennofrp-server-* opennofrp-vpn-* WINTUN-LICENSE.txt
           else
-            tar -czvf "opennofrp-${TAG}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" opennofrp-*
+            tar -czvf "opennofrp-${TAG}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" opennofrp-* WINTUN-LICENSE.txt
           fi
 
       - name: Upload Artifacts

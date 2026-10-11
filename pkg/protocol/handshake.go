@@ -25,6 +25,7 @@ const (
 	MsgClientUpdate       ControlMessageType = "client_update"
 	MsgClientUpdateResult ControlMessageType = "client_update_result"
 	MsgClientUpdateAck    ControlMessageType = "client_update_ack"
+	MsgVPNHandshake       ControlMessageType = "vpn_handshake"
 )
 
 // HandshakeRequest 由 Client 在与 Server 建立控制 TCP 连接后、打开 yamux 会话之前
@@ -58,9 +59,26 @@ const (
 	// CapUDPSpoof：支持 UDP 源 IP 伪装拨号。
 	CapUDPSpoof = "udp_spoof"
 	// CapPortRange：支持端口段规则（RemotePortEnd/LocalPort 偏移映射）。
-	CapPortRange  = "port_range"
-	CapSelfUpdate = "self_update"
+	CapPortRange    = "port_range"
+	CapSelfUpdate   = "self_update"
+	CapTemporaryVPN = "temporary_vpn"
 )
+
+type VPNHandshake struct {
+	Type            ControlMessageType `json:"type"`
+	ProtocolVersion uint8              `json:"protocol_version"`
+	Token           string             `json:"token"`
+}
+type VPNHandshakeResponse struct {
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+	VirtualIP string `json:"virtual_ip,omitempty"`
+	ExpiresAt int64  `json:"expires_at,omitempty"`
+}
+type VPNDialRequest struct {
+	Network string `json:"network"`
+	Port    uint16 `json:"port"`
+}
 
 // Update requests deliberately contain no URL or shell command. Clients only
 // install their own platform asset from the configured official release source.

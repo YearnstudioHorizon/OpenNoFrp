@@ -61,7 +61,7 @@ func (t TransportKind) String() string {
 //	bytes   19..21  : 原始客户端端口（uint16）
 //	bytes   21..25  : RuleID（uint32）——标识该连接属于 Client 当前生效的
 //	                  规则（来自最近一次 RulesSnapshot）中的哪一条
-//	byte    25      : flags（位标志；bit0 = FlagDialAck，其余保留为 0）
+//	byte    25      : flags（bit0 = FlagDialAck，bit1 = FlagTemporaryVPN）
 //	bytes   26..28  : 尾部变长区段的长度（uint16），
 //	                  目前始终为 0，保留用于未来扩展
 //	                  （例如 SNI 提示），而不会破坏固定头部
@@ -80,17 +80,24 @@ type StreamMetadata struct {
 	// 据此拨号本地端口 LocalPort+PortOffset。编码在尾部区段（TLV：type=
 	// TrailerPortOffset, uint16 长度=2, uint16 值）；为 0 时不编码。
 	PortOffset uint16
+	// VPNPort is the authorized loopback destination port for temporary VPN
+	// streams. It is used only with FlagTemporaryVPN and RuleID == 0.
+	VPNPort uint16
 }
 
 // 尾部区段 TLV 类型。
 const (
 	TrailerSNI        byte = 1
 	TrailerPortOffset byte = 2
+	TrailerVPNPort    byte = 3
 )
 
 // encodeTrailer 将可选扩展字段编码为尾部区段。
 func (m StreamMetadata) encodeTrailer() []byte {
 	var out []byte
+	if m.VPNPort != 0 {
+		out = append(out, TrailerVPNPort, 0, 2, byte(m.VPNPort>>8), byte(m.VPNPort))
+	}
 	if m.SNI != "" && len(m.SNI) <= 255 {
 		out = append(out, TrailerSNI, 0, byte(len(m.SNI)))
 		out = append(out, m.SNI...)
@@ -111,6 +118,10 @@ func (m *StreamMetadata) decodeTrailer(b []byte) {
 			return
 		}
 		switch t {
+		case TrailerVPNPort:
+			if n == 2 {
+				m.VPNPort = binary.BigEndian.Uint16(b[:2])
+			}
 		case TrailerSNI:
 			m.SNI = string(b[:n])
 		case TrailerPortOffset:
@@ -126,6 +137,9 @@ func (m *StreamMetadata) decodeTrailer(b []byte) {
 // 一个状态字节（DialAckOK / DialAckFailed）。Server 的 HTTP 模式用它判断后端
 // 是否可用，以便在后端离线时返回自定义的“服务不可用”页面。
 const FlagDialAck uint8 = 1 << 0
+
+// FlagTemporaryVPN selects private loopback access, independently of rules.
+const FlagTemporaryVPN uint8 = 1 << 1
 
 // 拨号确认状态字节。
 const (

@@ -54,6 +54,7 @@ type Client struct {
 	// 调用方应将其持久化（参见 config.SaveCredentials）。
 	OnCredentials  func(c config.Credentials)
 	Handler        StreamHandler
+	VPNHandler     StreamHandler
 	Update         func(context.Context) (updater.Result, error)
 	Restart        func() error
 	controlWriteMu sync.Mutex
@@ -233,6 +234,9 @@ func (c *Client) handshakeOrRegister(conn net.Conn) error {
 	if c.Update != nil && c.Restart != nil {
 		caps = append(caps, protocol.CapSelfUpdate)
 	}
+	if c.VPNHandler != nil {
+		caps = append(caps, protocol.CapTemporaryVPN)
+	}
 	req := protocol.HandshakeRequest{
 		Type:            protocol.MsgHandshakeRequest,
 		ProtocolVersion: protocol.ProtocolVersion,
@@ -309,6 +313,12 @@ func (c *Client) serveStream(ctx context.Context, stream net.Conn) {
 		return
 	}
 
+	if meta.HasFlag(protocol.FlagTemporaryVPN) {
+		if c.VPNHandler != nil {
+			c.VPNHandler(ctx, meta, stream)
+		}
+		return
+	}
 	if c.Handler != nil {
 		c.Handler(ctx, meta, stream)
 	}

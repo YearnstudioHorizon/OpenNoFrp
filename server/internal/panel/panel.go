@@ -156,6 +156,10 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("POST /reserved/remove", auth(p.handleRemoveReserved))
 	mux.HandleFunc("POST /admin/password", auth(p.handleChangePassword))
 	mux.HandleFunc("GET /security", auth(p.handleSecurityGet))
+	mux.HandleFunc("GET /vpn", auth(p.handleVPNGet))
+	mux.Handle("POST /vpn", http.MaxBytesHandler(auth(p.handleVPNCreate), 8<<10))
+	mux.HandleFunc("POST /vpn/{id}/revoke", auth(p.handleVPNRevoke))
+	mux.HandleFunc("GET /vpn/download/{platform}", auth(p.handleVPNDownload))
 	mux.Handle("POST /security/captcha", http.MaxBytesHandler(auth(p.handleCaptchaSettings), 16<<10))
 	mux.HandleFunc("GET /api/check-update", auth(p.handleCheckUpdate))
 	// /metrics 自行鉴权：面板登录会话或 Bearer MetricsToken。

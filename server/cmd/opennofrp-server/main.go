@@ -232,6 +232,7 @@ func runServer() {
 
 type server struct {
 	clientUpdates sync.Map // client ID -> in-flight update
+	activeVPN     sync.Map // temporary VPN ID -> active lease
 	cfg           *config.Config
 	logger        *slog.Logger
 	store         *store.Store
@@ -365,6 +366,10 @@ func (s *server) handleControlConn(conn net.Conn) {
 	first, err := readControlMessage(conn)
 	if err != nil {
 		s.logger.Warn("first control message read failed", "remote", conn.RemoteAddr(), "error", err)
+		return
+	}
+	if first.Type == protocol.MsgVPNHandshake {
+		s.handleVPNConnection(conn, first.raw, ip)
 		return
 	}
 

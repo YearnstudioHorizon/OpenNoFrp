@@ -20,6 +20,7 @@ import (
 	"opennofrp/client/internal/rulesync"
 	"opennofrp/client/internal/tproxy"
 	"opennofrp/pkg/protocol"
+	"opennofrp/pkg/tempvpn"
 	"opennofrp/pkg/updater"
 	"opennofrp/pkg/version"
 )
@@ -135,7 +136,8 @@ func runClient() {
 		OnRules: func(rs []protocol.Rule) {
 			rules.Apply(rs)
 		},
-		Handler: rules.ServeStream,
+		Handler:    rules.ServeStream,
+		VPNHandler: tempvpn.ServeLoopback,
 	}
 	// Resolve the path before installation: after atomic replacement Linux may
 	// report the old executable as '(deleted)'. Exec keeps PID, arguments and env.

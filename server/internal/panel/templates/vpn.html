@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>临时 VPN · OpenNoFrp</title><link rel="stylesheet" href="/static/app.css">{{template "theme-head" .}}<script src="/static/vpn.js" defer></script></head>
+<body data-page="vpn" data-page-title="临时 VPN">
+{{template "app-shell" .}}
+<main class="container" id="main-content">
+  <div class="page-hero"><div><div class="eyebrow">TEMPORARY ACCESS</div><h1>临时 VPN</h1><p class="page-description">用原端口访问内网机器的本机服务，到期自动断开。</p></div></div>
+  {{if .Error}}<div class="alert alert-err" role="alert">{{.Error}}</div>{{end}}
+  {{if .Config}}
+  <section class="card"><h2>接入已创建，下载后连接</h2><p class="desc">配置包含接入凭据，仅在本次创建后显示。离开页面前请下载；不要分享给无关人员。</p>
+    <ol class="vpn-steps"><li><strong>下载接入程序</strong><div class="form-actions"><a class="btn" href="/vpn/download/windows-amd64">Windows x64</a><a class="btn" href="/vpn/download/linux-amd64">Linux x64</a><a class="btn" href="/vpn/download/linux-arm64">Linux ARM64</a></div><p class="help">下载入口优先使用服务器托管文件，否则转到最新 GitHub Release。需要包含临时 VPN 功能的发布版本。</p></li>
+    <li><strong>下载配置，放在程序旁边</strong><div class="form-actions"><button class="btn btn-primary" id="vpn-download-config" type="button">下载 opennofrp-vpn.json</button></div><details><summary>查看配置</summary><textarea id="vpn-config" readonly rows="8" autocomplete="off" spellcheck="false" aria-label="临时 VPN 配置">{{.Config}}</textarea></details></li>
+    <li><strong>以管理员 / root 权限运行</strong><p class="help">Windows：在管理员 PowerShell 中运行</p><pre><code>.\opennofrp-vpn-windows-amd64.exe -config .\opennofrp-vpn.json</code></pre><p class="help">Linux：需安装 iproute2，并允许使用 /dev/net/tun。根据架构替换文件名。</p><pre><code>chmod +x opennofrp-vpn-linux-amd64
+sudo ./opennofrp-vpn-linux-amd64 -config ./opennofrp-vpn.json</code></pre></li>
+    <li><strong>用地址和原端口访问服务</strong><p>例如，目标机器的 <code>127.0.0.1:8080</code> 对应 <code>http://10.203.0.1:8080</code>。支持 TCP 和 UDP；按 Ctrl+C 断开。</p></li></ol>
+  </section>
+  {{else}}
+  <section class="card"><h2>创建临时接入</h2><p class="desc">选择一台在线内网机器，授权访问它的 127.0.0.1 上全部 TCP / UDP 端口。同一凭据同时允许一个接入程序连接。</p>
+    <form method="post" action="/vpn"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><div class="form-grid">
+      <div class="field"><label for="vpn-target">目标机器</label><select name="client_id" id="vpn-target" required><option value="">选择内网机器</option>{{range .Targets}}<option value="{{.ID}}" {{if not .Ready}}disabled{{end}}>{{.Name}}{{if not .Ready}}（离线或需更新 Client）{{end}}</option>{{end}}</select></div>
+      <div class="field"><label for="vpn-name">接入名称</label><input name="name" id="vpn-name" required maxlength="40" placeholder="例如：临时维护电脑" autocomplete="off"></div>
+      <div class="field"><label for="vpn-expiry">有效期</label><select name="minutes" id="vpn-expiry"><option value="15">15 分钟</option><option value="60" selected>1 小时</option><option value="240">4 小时</option><option value="1440">24 小时</option></select></div>
+    </div><p class="wizard-tip">连接程序只添加到 10.203.0.1 的单地址路由，不设置默认网关或 DNS。若该地址已有专用路由，程序会拒绝连接。一次连接一台机器。</p><div class="form-actions"><button class="btn btn-primary" type="submit">创建并下载配置</button></div></form>
+  </section>
+  {{end}}
+  <section class="card"><h2>接入记录</h2><p class="desc">可随时撤销凭据，已有连接会在约一秒内关闭。「有效」表示凭据未到期，不表示正在连接。</p>
+  {{if .Leases}}<div class="table-wrap"><table><thead><tr><th>名称</th><th>目标机器</th><th>到期时间</th><th>状态</th><th>操作</th></tr></thead><tbody>{{range .Leases}}<tr><td>{{.Name}}</td><td>{{.Client}}</td><td>{{.Expires}}</td><td>{{.Status}}</td><td>{{if .Active}}<form method="post" action="/vpn/{{.ID}}/revoke" data-confirm="撤销后，此配置将失效，已有连接会断开。"><input type="hidden" name="csrf_token" value="{{$.CSRF}}"><button class="btn btn-danger btn-sm" type="submit">撤销</button></form>{{else}}—{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="empty-state">还没有临时接入，创建后会显示在这里。</p>{{end}}
+  </section>
+</main></body></html>

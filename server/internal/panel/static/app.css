@@ -557,4 +557,9 @@ textarea { line-height: 1.7; }
 .client-version-card { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .client-version-card .desc { margin-bottom: 8px; }
 .client-version-card form { flex-shrink: 0; }
+.vpn-steps { padding-left: 24px; }
+.vpn-steps > li { padding: 8px 0 20px 8px; }
+.vpn-steps > li:last-child { padding-bottom: 0; }
+.vpn-steps .form-actions { position: static; }
+#vpn-config { width: 100%; margin-top: 12px; font-family: monospace; resize: vertical; }
 @media(max-width: 800px) { .client-version-card { flex-direction: column; align-items: stretch; } .client-version-card button { width: 100%; } }
