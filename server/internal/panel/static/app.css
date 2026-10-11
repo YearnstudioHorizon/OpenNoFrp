@@ -553,3 +553,8 @@ textarea { line-height: 1.7; }
 #captcha-settings > .field { max-width: 400px; margin-bottom: 20px; }
 #captcha-settings > [data-captcha-settings] { margin-top: 20px; }
 #captcha-widget { min-height: 50px; }
+
+.client-version-card { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.client-version-card .desc { margin-bottom: 8px; }
+.client-version-card form { flex-shrink: 0; }
+@media(max-width: 800px) { .client-version-card { flex-direction: column; align-items: stretch; } .client-version-card button { width: 100%; } }

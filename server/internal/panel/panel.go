@@ -64,6 +64,7 @@ type Panel struct {
 	// ClientStatus 返回某个 Client 当前是否有活跃会话、其上报的版本与能力列表。
 	// 由 Server 核心在构造后注入；为 nil 时面板回退为基于 LastSeen 的判断。
 	ClientStatus func(clientID string) (online bool, version string, caps []string)
+	UpdateClient func(context.Context, string) (string, error)
 	// RuleStats 返回各规则的实时统计（活跃连接、流量、后端错误等），由 Server 核心注入；
 	// 为 nil 时面板不显示统计，/metrics 只输出客户端在线状态。
 	RuleStats func() []listener.RuleStats
@@ -147,6 +148,7 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("POST /clients/{id}/rules", auth(p.handleCreateRule))
 	mux.HandleFunc("POST /clients/{id}/rename", auth(p.handleRenameClient))
 	mux.HandleFunc("POST /clients/{id}/delete", auth(p.handleDeleteClient))
+	mux.HandleFunc("POST /clients/{id}/update", auth(p.handleUpdateClient))
 	mux.HandleFunc("POST /rules/{id}/edit", auth(p.handleEditRule))
 	mux.HandleFunc("POST /rules/{id}/toggle", auth(p.handleToggleRule))
 	mux.HandleFunc("POST /rules/{id}/delete", auth(p.handleDeleteRule))
@@ -654,14 +656,15 @@ func (p *Panel) handleClientPage(w http.ResponseWriter, r *http.Request) {
 		"Client": struct {
 			ID, Name, LastSeen string
 		}{ID: c.ID, Name: c.Name, LastSeen: lastSeen},
-		"Online":        online,
-		"ClientVersion": clientVersion,
-		"Outdated":      outdated,
-		"Rules":         rules,
-		"EditRule":      editRule,
-		"CSRF":          csrfFrom(r),
-		"Error":         friendlyMsg(r.URL.Query().Get("err")),
-		"Notice":        friendlyMsg(r.URL.Query().Get("ok")),
+		"Online":          online,
+		"ClientVersion":   clientVersion,
+		"CanUpdateClient": online && p.UpdateClient != nil && protocol.HasCapability(caps, protocol.CapSelfUpdate),
+		"Outdated":        outdated,
+		"Rules":           rules,
+		"EditRule":        editRule,
+		"CSRF":            csrfFrom(r),
+		"Error":           friendlyMsg(r.URL.Query().Get("err")),
+		"Notice":          friendlyMsg(r.URL.Query().Get("ok")),
 	})
 }
 

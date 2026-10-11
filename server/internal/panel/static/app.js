@@ -155,7 +155,7 @@ document.querySelectorAll('form').forEach(form => form.addEventListener('submit'
   if (!button || button.tagName !== 'BUTTON') return;
   // Delaying preserves submitter values and existing confirmation handlers.
   const original = button.textContent;
-  setTimeout(() => { if (event.defaultPrevented) return; button.dataset.originalText = original; button.disabled = true; button.setAttribute('aria-busy', 'true'); button.textContent = '处理中…'; }, 0);
+  setTimeout(() => { if (event.defaultPrevented) return; button.dataset.originalText = original; button.disabled = true; button.setAttribute('aria-busy', 'true'); button.textContent = button.dataset.busyLabel || '处理中…'; }, 0);
 }));
 window.addEventListener('pageshow', event => { if (event.persisted) document.querySelectorAll('[aria-busy="true"]').forEach(button => { button.disabled = false; button.removeAttribute('aria-busy'); button.textContent = button.dataset.originalText || '提交'; }); });
 

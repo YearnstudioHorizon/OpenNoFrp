@@ -27,9 +27,14 @@ type Session struct {
 	ClientVersion string
 	Capabilities  []string
 
-	mu           sync.Mutex
-	lastActivity time.Time
-	ctrlStream   net.Conn // 双向控制流：上行心跳，下行快照及确认
+	mu                 sync.Mutex
+	writeMu            sync.Mutex
+	updateID           string
+	updateResult       chan protocol.ClientUpdateResult
+	lastUpdateID       string
+	updateRestartError string
+	lastActivity       time.Time
+	ctrlStream         net.Conn // 双向控制流：上行心跳，下行快照及确认
 }
 
 // HasCapability 报告该会话的 Client 是否在握手时声明了能力 c。
@@ -81,10 +86,26 @@ func (s *Session) PushRulesSnapshot(rules []protocol.Rule) error {
 	if c == nil {
 		return nil
 	}
-	return protocol.WriteJSONMessage(c, protocol.RulesSnapshot{
+	return s.writeControl(protocol.RulesSnapshot{
 		Type:  protocol.MsgRulesSnapshot,
 		Rules: rules,
 	})
+}
+
+func (s *Session) writeControl(message any) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.Lock()
+	c := s.ctrlStream
+	s.mu.Unlock()
+	if c == nil {
+		return errors.New("client control stream unavailable")
+	}
+	if err := c.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	defer c.SetWriteDeadline(time.Time{})
+	return protocol.WriteJSONMessage(c, message)
 }
 
 // OpenStreamFor 为一个新接受的公网 TCP 连接向 Client 打开新的 yamux 流，写入

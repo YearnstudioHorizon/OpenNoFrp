@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"opennofrp/client/internal/config"
@@ -135,6 +136,18 @@ func runClient() {
 			rules.Apply(rs)
 		},
 		Handler: rules.ServeStream,
+	}
+	// Resolve the path before installation: after atomic replacement Linux may
+	// report the old executable as '(deleted)'. Exec keeps PID, arguments and env.
+	executable, execErr := os.Executable()
+	if execErr == nil {
+		executable, execErr = filepath.EvalSymlinks(executable)
+	}
+	if execErr == nil {
+		client.Update = func(ctx context.Context) (updater.Result, error) {
+			return updater.SelfUpdateWithResult(ctx, "opennofrp-client")
+		}
+		client.Restart = func() error { return syscall.Exec(executable, os.Args, os.Environ()) }
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

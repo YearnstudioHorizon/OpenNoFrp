@@ -187,6 +187,7 @@ func runServer() {
 		}
 		return true, sess.ClientVersion, sess.Capabilities
 	}
+	p.UpdateClient = s.updateClient
 	p.RuleStats = s.listener.Stats
 	p.MetricsToken = cfg.Server.MetricsToken
 	panelAddr := fmt.Sprintf("%s:%d", cfg.Server.PanelAddr, cfg.Server.PanelPort)
@@ -230,11 +231,12 @@ func runServer() {
 }
 
 type server struct {
-	cfg      *config.Config
-	logger   *slog.Logger
-	store    *store.Store
-	listener *listener.Manager
-	limiter  *handshakeLimiter
+	clientUpdates sync.Map // client ID -> in-flight update
+	cfg           *config.Config
+	logger        *slog.Logger
+	store         *store.Store
+	listener      *listener.Manager
+	limiter       *handshakeLimiter
 
 	mu       sync.Mutex
 	sessions map[string]*session.Session // clientID -> 活跃会话
@@ -471,7 +473,11 @@ func (s *server) watchControlStream(sess *session.Session, ym *yamux.Session, ct
 	timeout := time.Duration(s.cfg.Server.HeartbeatTimeoutSeconds) * time.Second
 	for {
 		var msg struct {
-			Type protocol.ControlMessageType `json:"type"`
+			Type      protocol.ControlMessageType `json:"type"`
+			RequestID string                      `json:"request_id"`
+			Status    string                      `json:"status"`
+			Version   string                      `json:"version"`
+			Error     string                      `json:"error"`
 		}
 		ctrl.SetReadDeadline(time.Now().Add(timeout))
 		if err := protocol.ReadJSONMessage(ctrl, &msg); err != nil {
@@ -481,6 +487,12 @@ func (s *server) watchControlStream(sess *session.Session, ym *yamux.Session, ct
 		if msg.Type == protocol.MsgHeartbeat {
 			sess.Touch()
 			_ = s.store.TouchClient(context.Background(), sess.ClientID, ctrl.RemoteAddr().String())
+		}
+		if msg.Type == protocol.MsgClientUpdateResult {
+			sess.ReceiveUpdateResult(protocol.ClientUpdateResult{Type: msg.Type, RequestID: msg.RequestID, Status: msg.Status, Version: msg.Version, Error: msg.Error})
+			if msg.Status == "restarting" {
+				_ = sess.AcknowledgeUpdate(msg.RequestID)
+			}
 		}
 	}
 }

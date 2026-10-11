@@ -15,13 +15,16 @@ import (
 type ControlMessageType string
 
 const (
-	MsgHandshakeRequest  ControlMessageType = "handshake_request"
-	MsgHandshakeResponse ControlMessageType = "handshake_response"
-	MsgHeartbeat         ControlMessageType = "heartbeat"
-	MsgHeartbeatAck      ControlMessageType = "heartbeat_ack"
-	MsgRegisterRequest   ControlMessageType = "register_request"
-	MsgRegisterResponse  ControlMessageType = "register_response"
-	MsgRulesSnapshot     ControlMessageType = "rules_snapshot"
+	MsgHandshakeRequest   ControlMessageType = "handshake_request"
+	MsgHandshakeResponse  ControlMessageType = "handshake_response"
+	MsgHeartbeat          ControlMessageType = "heartbeat"
+	MsgHeartbeatAck       ControlMessageType = "heartbeat_ack"
+	MsgRegisterRequest    ControlMessageType = "register_request"
+	MsgRegisterResponse   ControlMessageType = "register_response"
+	MsgRulesSnapshot      ControlMessageType = "rules_snapshot"
+	MsgClientUpdate       ControlMessageType = "client_update"
+	MsgClientUpdateResult ControlMessageType = "client_update_result"
+	MsgClientUpdateAck    ControlMessageType = "client_update_ack"
 )
 
 // HandshakeRequest 由 Client 在与 Server 建立控制 TCP 连接后、打开 yamux 会话之前
@@ -55,8 +58,23 @@ const (
 	// CapUDPSpoof：支持 UDP 源 IP 伪装拨号。
 	CapUDPSpoof = "udp_spoof"
 	// CapPortRange：支持端口段规则（RemotePortEnd/LocalPort 偏移映射）。
-	CapPortRange = "port_range"
+	CapPortRange  = "port_range"
+	CapSelfUpdate = "self_update"
 )
+
+// Update requests deliberately contain no URL or shell command. Clients only
+// install their own platform asset from the configured official release source.
+type ClientUpdateRequest struct {
+	Type      ControlMessageType `json:"type"`
+	RequestID string             `json:"request_id"`
+}
+type ClientUpdateResult struct {
+	Type      ControlMessageType `json:"type"`
+	RequestID string             `json:"request_id"`
+	Status    string             `json:"status"` // up_to_date, restarting, failed
+	Version   string             `json:"version,omitempty"`
+	Error     string             `json:"error,omitempty"`
+}
 
 // HasCapability 报告能力列表中是否包含 c。
 func HasCapability(caps []string, c string) bool {

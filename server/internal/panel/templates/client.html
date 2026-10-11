@@ -42,6 +42,13 @@
   {{if .Notice}}<div class="alert alert-ok">{{.Notice}}</div>{{end}}
   {{if .Outdated}}<div class="alert alert-err">这台机器的 Client 版本过旧（{{if .ClientVersion}}{{.ClientVersion}}{{else}}未知版本{{end}}），不支持 HTTP 规则所需的拨号确认，HTTP 规则将直接返回“服务不可用”页面。请在该机器上执行 <code>opennofrp-client update</code> 升级。</div>{{end}}
 
+  {{if not .EditorPage}}<section class="card client-version-card">
+    <div><h2>客户端版本 <span class="badge badge-gray">{{if .ClientVersion}}{{.ClientVersion}}{{else}}未知{{end}}</span></h2>
+    <p class="desc">更新到最新正式发布版本，安装完成后自动重启并重新连接。重启期间这台机器的隧道会短暂中断。</p>
+    {{if not .CanUpdateClient}}<p class="help">{{if not .Online}}机器离线，重新连接后才可更新。{{else}}此 Client 尚不支持远程更新。请先在机器上执行 <code>sudo opennofrp-client update</code>，然后重启客户端；之后即可一键更新。{{end}}</p>{{end}}</div>
+    <form method="post" action="/clients/{{.Client.ID}}/update" data-confirm="更新 Client 后会自动重启，这台机器的隧道会短暂中断。确定开始更新？"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="btn" type="submit" data-busy-label="正在更新，请稍候…" {{if not .CanUpdateClient}}disabled{{end}}>↑ 一键更新 Client</button></form>
+  </section>{{end}}
+
   {{if not .EditorPage}}<section class="card" id="rules">
     <h2>转发规则</h2>
     <p class="desc">启用中的规则会在服务器上开放对应公网端口，并实时同步到这台内网机器。多条 HTTP 规则可以按域名 / 路径共享同一个公网端口。</p>

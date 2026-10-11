@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"opennofrp/client/internal/config"
 	"opennofrp/pkg/crypto/tlsutil"
 	"opennofrp/pkg/protocol"
+	"opennofrp/pkg/updater"
 	"opennofrp/pkg/version"
 )
 
@@ -50,8 +52,12 @@ type Client struct {
 	OnRules func(rules []protocol.Rule)
 	// OnCredentials 在本机完成一次性注册并获得永久凭据时被调用一次；
 	// 调用方应将其持久化（参见 config.SaveCredentials）。
-	OnCredentials func(c config.Credentials)
-	Handler       StreamHandler
+	OnCredentials  func(c config.Credentials)
+	Handler        StreamHandler
+	Update         func(context.Context) (updater.Result, error)
+	Restart        func() error
+	controlWriteMu sync.Mutex
+	updating       atomic.Bool
 
 	seq                     uint64
 	lastObservedFingerprint string
@@ -223,13 +229,17 @@ func (c *Client) handshakeOrRegister(conn net.Conn) error {
 		c.Logger.Info("registered with server, permanent credentials saved", "client_id", newCreds.ClientID, "path", credsPath)
 		creds = &newCreds
 	}
+	caps := append([]string(nil), ClientCapabilities...)
+	if c.Update != nil && c.Restart != nil {
+		caps = append(caps, protocol.CapSelfUpdate)
+	}
 	req := protocol.HandshakeRequest{
 		Type:            protocol.MsgHandshakeRequest,
 		ProtocolVersion: protocol.ProtocolVersion,
 		ClientID:        creds.ClientID,
 		ClientSecret:    creds.ClientSecret,
 		ClientVersion:   version.Version,
-		Capabilities:    ClientCapabilities,
+		Capabilities:    caps,
 	}
 	if err := protocol.WriteJSONMessage(conn, req); err != nil {
 		return fmt.Errorf("controlconn: send handshake: %w", err)
@@ -253,12 +263,14 @@ func (c *Client) handshakeOrRegister(conn net.Conn) error {
 // rulesLoop 读取到达共享控制流上的 server->client RulesSnapshot 消息
 // （与我们写心跳的方向相反）。
 func (c *Client) rulesLoop(ctx context.Context, ctrlStream net.Conn) {
+	updateAck := make(chan string, 1)
 	for {
 		// RulesSnapshot 和 HeartbeatAck 与我们的心跳写入共享控制流，但方向
 		// 相反。每个带长度前缀的帧都会解码到这个信封结构中。
 		var env struct {
-			Type  protocol.ControlMessageType `json:"type"`
-			Rules []protocol.Rule             `json:"rules"`
+			Type      protocol.ControlMessageType `json:"type"`
+			Rules     []protocol.Rule             `json:"rules"`
+			RequestID string                      `json:"request_id"`
 		}
 		if err := protocol.ReadJSONMessage(ctrlStream, &env); err != nil {
 			if ctx.Err() == nil {
@@ -273,6 +285,15 @@ func (c *Client) rulesLoop(ctx context.Context, ctrlStream net.Conn) {
 			}
 		case protocol.MsgHeartbeatAck:
 			// 仅供参考，无需处理
+		case protocol.MsgClientUpdate:
+			if env.RequestID != "" {
+				c.startUpdate(ctx, ctrlStream, env.RequestID, updateAck)
+			}
+		case protocol.MsgClientUpdateAck:
+			select {
+			case updateAck <- env.RequestID:
+			default:
+			}
 		default:
 			c.Logger.Debug("unexpected message on control stream", "type", env.Type)
 		}
@@ -309,7 +330,7 @@ func (c *Client) heartbeatLoop(ctx context.Context, ctrlStream net.Conn) {
 				SequenceNum:  seq,
 				UnixTimeNano: time.Now().UnixNano(),
 			}
-			if err := protocol.WriteJSONMessage(ctrlStream, msg); err != nil {
+			if err := c.writeControl(ctrlStream, msg); err != nil {
 				c.Logger.Warn("heartbeat send failed", "error", err)
 				return
 			}

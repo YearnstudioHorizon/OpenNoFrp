@@ -110,8 +110,26 @@ func (info *UpdateInfo) FindMatchingAsset(componentName string, assets []Release
 	return ""
 }
 
-// SelfUpdate 执行当前二进制文件的在线一键更新
+// Result distinguishes an installed update from an already-current executable.
+type Result struct {
+	Updated bool
+	Version string
+}
+
+// SelfUpdate 执行当前二进制文件的在线一键更新。
 func SelfUpdate(ctx context.Context, componentName string) error {
+	_, err := SelfUpdateWithResult(ctx, componentName)
+	return err
+}
+
+// SelfUpdateWithResult reports whether a new executable was actually installed.
+func SelfUpdateWithResult(ctx context.Context, componentName string) (Result, error) {
+	result := Result{Version: version.Version}
+	err := selfUpdate(ctx, componentName, func(tag string) { result = Result{Updated: true, Version: tag} })
+	return result, err
+}
+
+func selfUpdate(ctx context.Context, componentName string, installed func(string)) error {
 	fmt.Printf("[OpenNoFrp] 正在检查最新版本 (当前版本: %s)...\n", version.Version)
 
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", GitHubRepo)
@@ -243,6 +261,7 @@ func SelfUpdate(ctx context.Context, componentName string) error {
 	}
 
 	fmt.Printf("[OpenNoFrp] 恭喜！已成功将 %s 更新至 %s\n", componentName, latestTag)
+	installed(latestTag)
 	fmt.Printf("[OpenNoFrp] 请执行以下命令重启对应服务以生效：\n")
 	if componentName == "opennofrp-server" {
 		fmt.Printf("  sudo systemctl restart opennofrp-server\n")
