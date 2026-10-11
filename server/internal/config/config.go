@@ -34,7 +34,7 @@ type ServerConfig struct {
 	MetricsToken string `toml:"metrics_token"`
 
 	// HeartbeatTimeoutSeconds：如果在这么多秒内没有收到某个 Client 的心跳
-	// （或任何流活动），Server 就认为它已断开连接。其公网监听仍保持开启
+	// （或其他控制消息），Server 就认为它已断开连接。默认 90 秒。其公网监听仍保持开启
 	// （它们由规则驱动，而非由会话驱动），但在 Client 重新连接之前，转发连接
 	// 会被拒绝。
 	HeartbeatTimeoutSeconds int `toml:"heartbeat_timeout_seconds"`
@@ -97,7 +97,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Server.PanelPort = 8080
 	}
 	if cfg.Server.HeartbeatTimeoutSeconds <= 0 {
-		cfg.Server.HeartbeatTimeoutSeconds = 30
+		cfg.Server.HeartbeatTimeoutSeconds = 90
 	}
 	if cfg.Server.DBPath == "" {
 		cfg.Server.DBPath = "/var/lib/opennofrp/opennofrp.db"
@@ -151,7 +151,7 @@ panel_port = 8080
 # Empty = /metrics requires a panel login session.
 # metrics_token = "change-me"
 
-heartbeat_timeout_seconds = 30
+heartbeat_timeout_seconds = 90
 db_path = "/var/lib/opennofrp/opennofrp.db"
 client_bin_dir = "/opt/opennofrp/client-bins"
 # public_base_url = "https://frp.example.com:8080"  # used in generated install commands

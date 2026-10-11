@@ -101,7 +101,7 @@ func (s *Session) writeControl(message any) error {
 	if c == nil {
 		return errors.New("client control stream unavailable")
 	}
-	if err := c.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := c.SetWriteDeadline(time.Now().Add(protocol.ControlWriteTimeout)); err != nil {
 		return err
 	}
 	defer c.SetWriteDeadline(time.Time{})

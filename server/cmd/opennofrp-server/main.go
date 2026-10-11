@@ -418,7 +418,7 @@ func (s *server) handleControlConn(conn net.Conn) {
 		}); err != nil {
 			return nil, err
 		}
-		return yamux.Server(conn, yamux.DefaultConfig())
+		return yamux.Server(conn, protocol.TunnelYamuxConfig())
 	}()
 	if err != nil {
 		s.logger.Error("failed to start yamux server session", "error", err)

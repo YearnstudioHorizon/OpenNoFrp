@@ -147,7 +147,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 		return err
 	}
 
-	session, err := yamux.Client(conn, yamux.DefaultConfig())
+	session, err := yamux.Client(conn, protocol.TunnelYamuxConfig())
 	if err != nil {
 		return fmt.Errorf("controlconn: start yamux session: %w", err)
 	}

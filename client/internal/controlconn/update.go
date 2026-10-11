@@ -11,7 +11,7 @@ import (
 func (c *Client) writeControl(conn net.Conn, message any) error {
 	c.controlWriteMu.Lock()
 	defer c.controlWriteMu.Unlock()
-	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(protocol.ControlWriteTimeout)); err != nil {
 		return err
 	}
 	defer conn.SetWriteDeadline(time.Time{})
