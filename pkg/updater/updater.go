@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -248,10 +249,106 @@ func compareVersions(current, latest string) bool {
 	if c == "" || l == "" {
 		return false
 	}
+	latestParts, latestPre, validLatest := parseVersion(l)
+	if !validLatest {
+		return false
+	}
 	if c == "dev" {
 		return true // 开发版本允许升级至正式发布版
 	}
-	return c != l
+	currentParts, currentPre, validCurrent := parseVersion(c)
+	if !validCurrent {
+		return false
+	}
+	for i := range currentParts {
+		if latestParts[i] != currentParts[i] {
+			return latestParts[i] > currentParts[i]
+		}
+	}
+	if currentPre == latestPre {
+		return false
+	}
+	if currentPre == "" {
+		return false
+	}
+	if latestPre == "" {
+		return true
+	}
+	cids, lids := strings.Split(currentPre, "."), strings.Split(latestPre, ".")
+	for i := 0; i < len(cids) && i < len(lids); i++ {
+		if cids[i] == lids[i] {
+			continue
+		}
+		cn := strings.Trim(cids[i], "0123456789") == ""
+		ln := strings.Trim(lids[i], "0123456789") == ""
+		if cn && ln {
+			if len(lids[i]) != len(cids[i]) {
+				return len(lids[i]) > len(cids[i])
+			}
+			return lids[i] > cids[i]
+		}
+		if cn {
+			return true
+		}
+		if ln {
+			return false
+		}
+		return lids[i] > cids[i]
+	}
+	return len(lids) > len(cids)
+}
+
+func parseVersion(v string) ([3]uint64, string, bool) {
+	var parts [3]uint64
+	core, build, hasBuild := strings.Cut(v, "+")
+	if hasBuild && !validVersionIdentifiers(build, false) {
+		return parts, "", false
+	}
+	core, pre, hasPre := strings.Cut(core, "-")
+	if hasPre && !validVersionIdentifiers(pre, true) {
+		return parts, "", false
+	}
+	numbers := strings.Split(core, ".")
+	if len(numbers) != 3 {
+		return parts, "", false
+	}
+	for i, s := range numbers {
+		if s == "" || (len(s) > 1 && s[0] == '0') {
+			return parts, "", false
+		}
+		for _, ch := range s {
+			if ch < '0' || ch > '9' {
+				return parts, "", false
+			}
+		}
+		n, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return parts, "", false
+		}
+		parts[i] = n
+	}
+	return parts, pre, true
+}
+
+func validVersionIdentifiers(s string, prerelease bool) bool {
+	for _, id := range strings.Split(s, ".") {
+		if id == "" {
+			return false
+		}
+		numeric := true
+		for _, ch := range id {
+			if ch < '0' || ch > '9' {
+				numeric = false
+			}
+			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch == '-') {
+				return false
+			}
+		}
+		if prerelease && numeric && len(id) > 1 && id[0] == '0' {
+			return false
+		}
+	}
+	return true
 }
 
 func cleanVersion(v string) string {
