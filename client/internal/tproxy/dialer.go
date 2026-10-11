@@ -163,48 +163,32 @@ func connectWithTimeout(ctx context.Context, fd int, ipv4 bool, targetIP net.IP,
 		fmt.Errorf("tproxy: connect to %s:%d timed out after %ds (check: TPROXY rules, policy routing table, CONNMARK save/restore, sysctls -- see docs/01-architecture.md section 6.1)", targetIP, targetPort, timeoutSeconds))
 	defer cancel()
 
-	done := make(chan error, 1)
-	go func() {
-		var pfd unix.PollFd
-		pfd.Fd = int32(fd)
-		pfd.Events = unix.POLLOUT
+	// Poll synchronously: a background poller could access a closed and reused
+	// descriptor after cancellation, affecting an unrelated connection.
+	if connectErr != nil {
 		for {
-			n, err := unix.Poll([]unix.PollFd{pfd}, 100)
+			if pollCtx.Err() != nil {
+				return context.Cause(pollCtx)
+			}
+			pfds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLOUT}}
+			n, err := unix.Poll(pfds, 100)
 			if err != nil {
 				if err == unix.EINTR {
 					continue
 				}
-				done <- fmt.Errorf("tproxy: poll: %w", err)
-				return
+				return fmt.Errorf("tproxy: poll: %w", err)
 			}
 			if n > 0 {
 				break
 			}
-			select {
-			case <-pollCtx.Done():
-				return
-			default:
-			}
 		}
 		soErr, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ERROR)
 		if err != nil {
-			done <- fmt.Errorf("tproxy: SO_ERROR: %w", err)
-			return
+			return fmt.Errorf("tproxy: SO_ERROR: %w", err)
 		}
 		if soErr != 0 {
-			done <- fmt.Errorf("tproxy: connect to %s:%d: %w", targetIP, targetPort, syscall.Errno(soErr))
-			return
+			return fmt.Errorf("tproxy: connect to %s:%d: %w", targetIP, targetPort, syscall.Errno(soErr))
 		}
-		done <- nil
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			return err
-		}
-	case <-pollCtx.Done():
-		return context.Cause(pollCtx)
 	}
 
 	if err := unix.SetNonblock(fd, false); err != nil {
