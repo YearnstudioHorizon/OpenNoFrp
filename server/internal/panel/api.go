@@ -401,10 +401,10 @@ func (p *Panel) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := apiTokenPrefix + randomHex(24)
 	if _, err := p.Store.CreateAPIToken(r.Context(), name, hashSessionToken(tok), tok[:len(apiTokenPrefix)+6], r.FormValue("read_only") == "1"); err != nil {
-		p.redirectErr(w, r, "/?err="+url.QueryEscape(err.Error())+"#api-tokens")
+		p.redirectErr(w, r, "/api-tokens?err="+url.QueryEscape(err.Error()))
 		return
 	}
-	data := p.indexData(r)
+	data := p.workspaceData(r, "api-tokens")
 	data["NewAPIToken"] = tok
 	p.tmpl.ExecuteTemplate(w, "index.html", data)
 }
@@ -416,10 +416,10 @@ func (p *Panel) handleDeleteAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.Store.DeleteAPIToken(r.Context(), id); err != nil {
-		p.redirectErr(w, r, "/?err="+url.QueryEscape(err.Error())+"#api-tokens")
+		p.redirectErr(w, r, "/api-tokens?err="+url.QueryEscape(err.Error()))
 		return
 	}
-	http.Redirect(w, r, "/?ok=api+token+revoked#api-tokens", http.StatusSeeOther)
+	http.Redirect(w, r, "/api-tokens?ok=api+token+revoked", http.StatusSeeOther)
 }
 
 // apiTokenRow 是面板中展示的一行 API 令牌信息。

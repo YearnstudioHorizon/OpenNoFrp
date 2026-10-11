@@ -3,24 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>控制台 · OpenNoFrp</title>
+<title>{{.PageTitle}} · OpenNoFrp</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='1' y='1' width='22' height='22' rx='6' fill='%234f8cff'/%3E%3Cpath d='M7 12h9m-4-4 4 4-4 4' stroke='%23fff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
 {{template "theme-head" .}}
 </head>
-<body>
+<body data-page="{{.Page}}" data-page-title="{{.PageTitle}}">
 
 {{template "app-shell" .}}
 
-<main class="container" id="main-content">
+<main class="container page-{{.Page}}" id="main-content">
   <div class="page-head">
-    <div><div class="eyebrow">WORKSPACE OVERVIEW</div><h1>工作空间概览</h1><p>查看连接状态，管理你的内网机器与公网服务。</p></div>
-    <a class="btn btn-primary" href="#onboard">＋ 接入新机器</a>
+    <div><div class="eyebrow">WORKSPACE</div><h1>{{.PageTitle}}</h1><p>{{.PageDescription}}</p></div>
+    {{if or (eq .Page "overview") (eq .Page "clients")}}<a class="btn btn-primary" href="/onboard">＋ 接入新机器</a>{{end}}
   </div>
 
   {{if .Error}}<div class="alert alert-err">{{.Error}}</div>{{end}}
   {{if .Notice}}<div class="alert alert-ok">{{.Notice}}</div>{{end}}
 
+  {{if eq .Page "overview"}}
   <div class="system-strip">
     <div class="system-meta">
       <span><span class="status-dot"></span>服务端 <strong>{{.Version}}</strong></span>
@@ -37,8 +38,16 @@
     <div class="stat"><div class="num">{{.ClientCount}}</div><div class="label">已注册机器</div></div>
     <div class="stat accent"><div class="num">{{.TotalRules}}</div><div class="label">启用中的转发规则</div></div>
   </div>
+  <section class="card"><h2>下一步，想做什么？</h2><p class="desc">从需要的功能开始，每个页面只处理一件事。</p>
+    <div class="quick-links">
+      <a href="/clients"><span class="quick-icon">▤</span><strong>管理内网机器</strong><span>查看机器状态，管理隧道与转发规则。</span><b>查看机器 →</b></a>
+      <a href="/onboard"><span class="quick-icon">＋</span><strong>接入一台新机器</strong><span>生成安装命令，连接你的内网服务。</span><b>开始接入 →</b></a>
+      <a href="/api-tokens"><span class="quick-icon">⌘</span><strong>配置自动化访问</strong><span>创建 API 令牌，连接部署脚本与工具。</span><b>管理令牌 →</b></a>
+    </div>
+  </section>
+  {{end}}
 
-  <section class="card" id="clients">
+  {{if eq .Page "clients"}}<section class="card" id="clients">
     <h2>内网机器</h2>
     <p class="desc">已注册接入本服务器的内网客户端，点击名称管理其转发规则。</p>
     <div class="table-toolbar">
@@ -62,14 +71,14 @@
             <td>{{.RuleCount}}</td>
           </tr>
         {{else}}
-          <tr><td class="empty" colspan="5">还没有注册任何内网机器 — 用下方的安装命令接入第一台</td></tr>
+          <tr><td class="empty" colspan="5">还没有注册内网机器。<a href="/onboard">接入第一台机器 →</a></td></tr>
         {{end}}
         </tbody>
       </table>
     </div>
-  </section>
+  </section>{{end}}
 
-  <section class="card" id="onboard">
+  {{if eq .Page "onboard"}}<section class="card" id="onboard">
     <h2>接入新机器</h2>
     <p class="desc">生成一条一次性安装命令，在目标内网机器上执行即可完成注册（令牌只能使用一次）。</p>
     <form method="post" action="/register-token"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
@@ -98,9 +107,9 @@
       </div>
     </div>
     {{end}}
-  </section>
+  </section>{{end}}
 
-  <section class="card" id="reserved">
+  {{if eq .Page "reserved"}}<section class="card" id="reserved">
     <h2>保留端口</h2>
     <p class="desc">保留端口永远不会被转发规则占用，用于保护 SSH、面板等关键服务端口。</p>
     <div class="table-wrap">
@@ -131,9 +140,9 @@
         <div class="field" style="max-width:130px"><label>&nbsp;</label><button class="btn" type="submit">添加保留</button></div>
       </div>
     </form>
-  </section>
+  </section>{{end}}
 
-  <section class="card" id="api-tokens">
+  {{if eq .Page "api-tokens"}}<section class="card" id="api-tokens">
     <h2>API 令牌</h2>
     <p class="desc">用于调用 REST API（/api/v1/*），请求时携带 <code>Authorization: Bearer &lt;token&gt;</code>。只读令牌只能调用 GET 接口。</p>
     <div class="table-wrap">
@@ -175,9 +184,9 @@
       </div>
     </div>
     {{end}}
-  </section>
+  </section>{{end}}
 
-  <section class="card" id="account">
+  {{if eq .Page "account"}}<section class="card" id="account">
     <h2>修改管理员密码</h2>
     <p class="desc">为了账号安全，修改密码需要输入当前密码，且新密码长度至少 6 位。</p>
     <form method="post" action="/admin/password" style="max-width:340px"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
@@ -187,7 +196,7 @@
       </div>
       <div class="form-actions"><button class="btn btn-primary" type="submit">保存密码</button></div>
     </form>
-  </section>
+  </section>{{end}}
 
   <div class="foot">OpenNoFrp · 纯用户态内网穿透</div>
 </main>

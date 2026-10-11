@@ -129,9 +129,14 @@ func (p *Panel) Handler() http.Handler {
 		}
 	}
 
-	mux.HandleFunc("GET /", auth(p.handleIndex))
+	mux.HandleFunc("GET /{$}", auth(p.handleIndex))
+	for _, page := range []string{"clients", "onboard", "reserved", "api-tokens", "account"} {
+		mux.HandleFunc("GET /"+page, auth(p.handleWorkspace(page)))
+	}
 	mux.HandleFunc("POST /register-token", auth(p.handleCreateToken))
 	mux.HandleFunc("GET /clients/{id}", auth(p.handleClientPage))
+	mux.HandleFunc("GET /clients/{id}/rules/new", auth(p.handleClientPage))
+	mux.HandleFunc("GET /clients/{id}/rules/{ruleID}/edit", auth(p.handleClientPage))
 	mux.HandleFunc("POST /clients/{id}/rules", auth(p.handleCreateRule))
 	mux.HandleFunc("POST /clients/{id}/rename", auth(p.handleRenameClient))
 	mux.HandleFunc("POST /clients/{id}/delete", auth(p.handleDeleteClient))
@@ -322,6 +327,8 @@ func friendlyMsg(s string) string {
 		return "自定义不可用页面过大（上限 64 KB）"
 	case "rule saved":
 		return "规则已保存"
+	case "rule created":
+		return "隧道已创建，启用状态已同步到内网机器"
 	case "acme needs domain":
 		return "自动证书（ACME）至少需要绑定一个非通配的精确域名"
 	case "tls cert required":
@@ -427,8 +434,28 @@ func friendlyMsg(s string) string {
 	return s
 }
 
-// indexData 构造首页模板数据（首页与"生成令牌"后回显共用）。
-func (p *Panel) indexData(r *http.Request) map[string]any {
+// workspaceData loads only the resources used by the current workspace page.
+func (p *Panel) workspaceData(r *http.Request, page string) map[string]any {
+	titles := map[string][2]string{
+		"overview":   {"工作空间概览", "查看连接状态，快速进入需要的功能。"},
+		"clients":    {"内网机器", "管理接入的机器，查看连接状态与转发规则。"},
+		"onboard":    {"接入新机器", "生成安装命令，连接你的第一台内网机器。"},
+		"reserved":   {"保留端口", "保护 SSH、面板等服务使用的端口。"},
+		"api-tokens": {"API 令牌", "管理自动化程序的访问凭据。"},
+		"account":    {"账号设置", "管理管理员账号的登录密码。"},
+	}
+	data := map[string]any{"Page": page, "PageTitle": titles[page][0], "PageDescription": titles[page][1],
+		"Fingerprint": p.Fingerprint, "Version": version.Version, "CSRF": csrfFrom(r),
+		"Error": friendlyMsg(r.URL.Query().Get("err")), "Notice": friendlyMsg(r.URL.Query().Get("ok"))}
+	if page == "reserved" {
+		data["Reserved"], _ = p.Store.ReservedPorts(r.Context())
+	}
+	if page == "api-tokens" {
+		data["APITokens"] = p.apiTokenRows(r.Context())
+	}
+	if page != "overview" && page != "clients" {
+		return data
+	}
 	clients, _ := p.Store.ListClients(r.Context())
 	rows := []clientRow{}
 	onlineCount, totalRules := 0, 0
@@ -442,23 +469,25 @@ func (p *Panel) indexData(r *http.Request) map[string]any {
 		if online {
 			onlineCount++
 		}
-		totalRules += len(rules)
+		for _, rule := range rules {
+			if rule.Enabled {
+				totalRules++
+			}
+		}
 		rows = append(rows, clientRow{ID: c.ID, Name: c.Name, LastSeen: lastSeen, Online: online, RuleCount: len(rules)})
 	}
-	reserved, _ := p.Store.ReservedPorts(r.Context())
-	return map[string]any{
-		"Clients": rows, "Reserved": reserved,
-		"OnlineCount": onlineCount, "ClientCount": len(rows), "TotalRules": totalRules,
-		"Fingerprint": p.Fingerprint, "Version": version.Version,
-		"CSRF":      csrfFrom(r),
-		"APITokens": p.apiTokenRows(r.Context()),
-		"Error":     friendlyMsg(r.URL.Query().Get("err")),
-		"Notice":    friendlyMsg(r.URL.Query().Get("ok")),
-	}
+	data["Clients"], data["OnlineCount"], data["ClientCount"], data["TotalRules"] = rows, onlineCount, len(rows), totalRules
+	return data
 }
 
 func (p *Panel) handleIndex(w http.ResponseWriter, r *http.Request) {
-	p.tmpl.ExecuteTemplate(w, "index.html", p.indexData(r))
+	p.tmpl.ExecuteTemplate(w, "index.html", p.workspaceData(r, "overview"))
+}
+
+func (p *Panel) handleWorkspace(page string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p.tmpl.ExecuteTemplate(w, "index.html", p.workspaceData(r, page))
+	}
 }
 
 func (p *Panel) handleCreateToken(w http.ResponseWriter, r *http.Request) {
@@ -469,12 +498,12 @@ func (p *Panel) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 	tok, err := p.Store.CreateRegisterToken(r.Context(), r.FormValue("label"), time.Duration(ttlMin)*time.Minute)
 	if err != nil {
-		p.redirectErr(w, r, "/?err="+url.QueryEscape(err.Error()))
+		p.redirectErr(w, r, "/onboard?err="+url.QueryEscape(err.Error()))
 		return
 	}
 	base := p.baseURLOf(r)
 	cmd := fmt.Sprintf("curl -fsSL \"%s/install_client.sh?token=%s&fingerprint=%s\" | sudo bash", base, tok.Token, url.QueryEscape(p.Fingerprint))
-	data := p.indexData(r)
+	data := p.workspaceData(r, "onboard")
 	data["NewToken"] = cmd
 	p.tmpl.ExecuteTemplate(w, "index.html", data)
 }
@@ -560,11 +589,31 @@ func (p *Panel) handleClientPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ?edit=<ruleID> 时在页面中预填编辑表单。
+	// Keep legacy edit links working while rendering a dedicated editor page.
 	var editRule *store.Rule
-	if eid, err := strconv.ParseInt(r.URL.Query().Get("edit"), 10, 64); err == nil && eid > 0 {
-		if er, err := p.Store.GetRule(r.Context(), eid); err == nil && er.ClientID == c.ID {
-			editRule = &er
+	editID := r.PathValue("ruleID")
+	if editID == "" {
+		editID = r.URL.Query().Get("edit")
+	}
+	editorPage := strings.HasSuffix(r.URL.Path, "/rules/new") || editID != ""
+	if editID != "" {
+		eid, err := strconv.ParseInt(editID, 10, 64)
+		if err != nil || eid <= 0 {
+			http.NotFound(w, r)
+			return
+		}
+		er, err := p.Store.GetRule(r.Context(), eid)
+		if err != nil || er.ClientID != c.ID {
+			http.NotFound(w, r)
+			return
+		}
+		editRule = &er
+	}
+	pageTitle := "机器详情"
+	if editorPage {
+		pageTitle = "创建新隧道"
+		if editRule != nil {
+			pageTitle = "编辑隧道"
 		}
 	}
 
@@ -577,6 +626,7 @@ func (p *Panel) handleClientPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.tmpl.ExecuteTemplate(w, "client.html", map[string]any{
+		"Page": "clients", "PageTitle": pageTitle, "EditorPage": editorPage,
 		"Stats": statsByRule,
 		"Client": struct {
 			ID, Name, LastSeen string
@@ -917,15 +967,15 @@ func (p *Panel) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 	}
 	rule, errKey := p.parseRuleForm(r, clientID, 0)
 	if errKey != "" {
-		p.redirectErr(w, r, "/clients/"+clientID+"?err="+url.QueryEscape(errKey))
+		p.redirectErr(w, r, "/clients/"+clientID+"/rules/new?err="+url.QueryEscape(errKey))
 		return
 	}
 	if _, err := p.Store.CreateRule(r.Context(), rule); err != nil {
-		p.redirectErr(w, r, "/clients/"+clientID+"?err="+url.QueryEscape(err.Error()))
+		p.redirectErr(w, r, "/clients/"+clientID+"/rules/new?err="+url.QueryEscape(err.Error()))
 		return
 	}
 	p.rulesChanged()
-	http.Redirect(w, r, "/clients/"+clientID, http.StatusSeeOther)
+	http.Redirect(w, r, "/clients/"+clientID+"?ok=rule+created", http.StatusSeeOther)
 }
 
 // handleEditRule 覆盖一条现有规则的全部可变字段（ClientID 不可变）。
@@ -943,11 +993,11 @@ func (p *Panel) handleEditRule(w http.ResponseWriter, r *http.Request) {
 	}
 	rule, errKey := p.parseRuleForm(r, existing.ClientID, id64)
 	if errKey != "" {
-		p.redirectErr(w, r, fmt.Sprintf("/clients/%s?edit=%d&err=%s", existing.ClientID, id64, url.QueryEscape(errKey)))
+		p.redirectErr(w, r, fmt.Sprintf("/clients/%s/rules/%d/edit?err=%s", existing.ClientID, id64, url.QueryEscape(errKey)))
 		return
 	}
 	if err := p.Store.UpdateRule(r.Context(), rule); err != nil {
-		p.redirectErr(w, r, "/clients/"+existing.ClientID+"?err="+url.QueryEscape(err.Error()))
+		p.redirectErr(w, r, fmt.Sprintf("/clients/%s/rules/%d/edit?err=%s", existing.ClientID, id64, url.QueryEscape(err.Error())))
 		return
 	}
 	p.rulesChanged()
@@ -1004,7 +1054,7 @@ func (p *Panel) handleAddReserved(w http.ResponseWriter, r *http.Request) {
 	if port > 0 && port <= 65535 {
 		p.Store.AddReservedPort(r.Context(), uint16(port), r.FormValue("reason"))
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, "/reserved", http.StatusSeeOther)
 }
 
 func (p *Panel) handleRemoveReserved(w http.ResponseWriter, r *http.Request) {
@@ -1013,7 +1063,7 @@ func (p *Panel) handleRemoveReserved(w http.ResponseWriter, r *http.Request) {
 	if port > 0 && port <= 65535 {
 		p.Store.RemoveReservedPort(r.Context(), uint16(port))
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, "/reserved", http.StatusSeeOther)
 }
 
 func (p *Panel) handleChangePassword(w http.ResponseWriter, r *http.Request) {
@@ -1021,14 +1071,14 @@ func (p *Panel) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	curPW := r.FormValue("current_password")
 	newPW := r.FormValue("new_password")
 	if len(newPW) < 6 {
-		p.redirectErr(w, r, "/?err=password+too+short")
+		p.redirectErr(w, r, "/account?err=password+too+short")
 		return
 	}
 
 	// 严格校验原密码
 	ok, err := p.Store.SetAdminPasswordWithOld(r.Context(), curPW, newPW)
 	if err != nil || !ok {
-		p.redirectErr(w, r, "/?err=invalid+current+password")
+		p.redirectErr(w, r, "/account?err=invalid+current+password")
 		return
 	}
 
@@ -1039,7 +1089,7 @@ func (p *Panel) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	// 为当前改密操作重新发放新 Session Cookie
 	p.setSessionCookie(w, r)
-	http.Redirect(w, r, "/?ok=password+changed", http.StatusSeeOther)
+	http.Redirect(w, r, "/account?ok=password+changed", http.StatusSeeOther)
 }
 
 var (

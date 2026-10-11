@@ -3,30 +3,31 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Client.Name}} · OpenNoFrp</title>
+<title>{{.PageTitle}} · {{.Client.Name}} · OpenNoFrp</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='1' y='1' width='22' height='22' rx='6' fill='%234f8cff'/%3E%3Cpath d='M7 12h9m-4-4 4 4-4 4' stroke='%23fff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
 {{template "theme-head" .}}
 </head>
-<body>
+<body data-page="{{.Page}}" data-page-title="{{.PageTitle}}">
 
 {{template "app-shell" .}}
 
-<main class="container" id="main-content">
+<main class="container {{if .EditorPage}}editor-page{{end}}" id="main-content">
 
-  <a class="back" href="/">&larr; 返回内网机器列表</a>
+  {{if .EditorPage}}<a class="back" href="/clients/{{.Client.ID}}">&larr; 返回 {{.Client.Name}} 的隧道列表</a>{{else}}<a class="back" href="/clients">&larr; 返回内网机器列表</a>{{end}}
 
   <div class="page-head">
     <div>
       <h1>
-        {{.Client.Name}}
+        {{if .EditorPage}}{{.PageTitle}}{{else}}{{.Client.Name}}{{end}}
+        {{if not .EditorPage}}
         {{if .Online}}<span class="badge badge-green pulse" style="vertical-align:middle;margin-left:8px"><span class="dot"></span>在线</span>
-        {{else}}<span class="badge badge-gray" style="vertical-align:middle;margin-left:8px"><span class="dot"></span>离线</span>{{end}}
+        {{else}}<span class="badge badge-gray" style="vertical-align:middle;margin-left:8px"><span class="dot"></span>离线</span>{{end}}{{end}}
       </h1>
-      <div class="hint"><span class="tag-id">{{.Client.ID}}</span> &nbsp;·&nbsp; 最近心跳：{{.Client.LastSeen}}</div>
+      <div class="hint">{{if .EditorPage}}目标机器：{{.Client.Name}} · 按步骤配置，确认后生效{{else}}<span class="tag-id">{{.Client.ID}}</span> &nbsp;·&nbsp; 最近心跳：{{.Client.LastSeen}}{{end}}</div>
     </div>
-    <div class="btn-row">
-      <a class="btn btn-primary" href="#rule-form">＋ 新建规则</a>
+    {{if not .EditorPage}}<div class="btn-row">
+      <a class="btn btn-primary" href="/clients/{{.Client.ID}}/rules/new">＋ 创建新隧道</a>
       <form class="inline" method="post" action="/clients/{{.Client.ID}}/rename"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
         <input name="name" value="{{.Client.Name}}" style="width:170px;display:inline-block" aria-label="机器名称">
         <button class="btn btn-sm" type="submit" style="margin-left:6px">重命名</button>
@@ -34,14 +35,14 @@
       <form class="inline" method="post" action="/clients/{{.Client.ID}}/delete" data-confirm="确定删除这台机器及其全部转发规则？此操作不可恢复。"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
         <button class="btn btn-danger btn-sm" type="submit">删除机器</button>
       </form>
-    </div>
+    </div>{{end}}
   </div>
 
   {{if .Error}}<div class="alert alert-err">{{.Error}}</div>{{end}}
   {{if .Notice}}<div class="alert alert-ok">{{.Notice}}</div>{{end}}
   {{if .Outdated}}<div class="alert alert-err">这台机器的 Client 版本过旧（{{if .ClientVersion}}{{.ClientVersion}}{{else}}未知版本{{end}}），不支持 HTTP 规则所需的拨号确认，HTTP 规则将直接返回“服务不可用”页面。请在该机器上执行 <code>opennofrp-client update</code> 升级。</div>{{end}}
 
-  <section class="card" id="rules">
+  {{if not .EditorPage}}<section class="card" id="rules">
     <h2>转发规则</h2>
     <p class="desc">启用中的规则会在服务器上开放对应公网端口，并实时同步到这台内网机器。多条 HTTP 规则可以按域名 / 路径共享同一个公网端口。</p>
     <div class="table-toolbar">
@@ -76,7 +77,7 @@
             <td>{{if .Enabled}}<span class="badge badge-green"><span class="dot"></span>启用</span>{{else}}<span class="badge badge-gray"><span class="dot"></span>停用</span>{{end}}</td>
             <td>
               <div class="btn-row">
-                <a class="btn btn-sm" href="/clients/{{$.Client.ID}}?edit={{.ID}}#rule-form">编辑</a>
+                <a class="btn btn-sm" href="/clients/{{$.Client.ID}}/rules/{{.ID}}/edit">编辑</a>
                 <form class="inline" method="post" action="/rules/{{.ID}}/toggle"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
                   <button class="btn btn-sm" type="submit">{{if .Enabled}}停用{{else}}启用{{end}}</button>
                 </form>
@@ -87,23 +88,23 @@
             </td>
           </tr>
         {{else}}
-          <tr><td class="empty" colspan="8">暂无规则 — 用下方表单创建第一条转发</td></tr>
+          <tr><td class="empty" colspan="8">暂无转发规则。<a href="/clients/{{.Client.ID}}/rules/new">创建第一个隧道 →</a></td></tr>
         {{end}}
         </tbody>
       </table>
     </div>
-  </section>
+  </section>{{end}}
 
-  {{$e := .EditRule}}
+  {{if .EditorPage}}{{$e := .EditRule}}
   <section class="card" id="rule-form">
     {{if $e}}
     <h2>编辑规则 #{{$e.ID}}</h2>
     <p class="desc">修改后立即生效；如修改了公网端口，旧端口会被关闭。 <a href="/clients/{{.Client.ID}}">取消编辑</a></p>
-    <form method="post" action="/rules/{{$e.ID}}/edit" id="rule-editor"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <form method="post" action="/rules/{{$e.ID}}/edit" id="rule-editor" data-client-name="{{.Client.Name}}"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
     {{else}}
-    <h2>新建规则</h2>
+    <h2>创建新隧道</h2>
     <p class="desc">第一步选择协议，第二步填写端口等信息。流量路径：访问者 → 服务器公网端口 → 内网机器 → 本地服务端口。</p>
-    <form method="post" action="/clients/{{.Client.ID}}/rules" id="rule-editor"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <form method="post" action="/clients/{{.Client.ID}}/rules" id="rule-editor" data-client-name="{{.Client.Name}}"><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
     {{end}}
 
       <div class="step-title"><span class="step-no">1</span>选择协议</div>
@@ -309,7 +310,7 @@
         </div>
       </div>
     </form>
-  </section>
+  </section>{{end}}
 
   <div class="foot">OpenNoFrp · 纯用户态内网穿透</div>
 </main>
@@ -350,7 +351,7 @@
     form.querySelectorAll('.tls-custom').forEach(function (el) {
       var show = isHTTP && tlsMode.value === 'custom';
       el.hidden = !show;
-      el.querySelectorAll('textarea').forEach(function (i) { i.disabled = !show; });
+      el.querySelectorAll('textarea').forEach(function (i) { i.disabled = !show; i.required = show && form.action.indexOf('/edit') < 0; });
     });
   }
   if (tlsMode) tlsMode.addEventListener('change', applyTLS);

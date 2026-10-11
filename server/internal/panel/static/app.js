@@ -45,16 +45,23 @@ if (mobileLayout) { mobileLayout.addEventListener('change', closeMenu); closeMen
 document.querySelectorAll('.sidebar nav a').forEach(link => link.addEventListener('click', closeMenu));
 function syncNavigation() {
   const detail = location.pathname.startsWith('/clients/');
-  const key = detail ? 'clients' : (location.hash.slice(1) || 'overview');
+  const key = document.body.dataset.page || (detail ? 'clients' : 'overview');
   document.querySelectorAll('[data-nav]').forEach(link => {
     const active = link.dataset.nav === key;
     link.classList.toggle('active', active);
     if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   });
   const locationLabel = document.getElementById('page-location');
-  if (locationLabel) locationLabel.textContent = detail ? '机器详情' : '概览';
+  if (locationLabel) locationLabel.textContent = document.body.dataset.pageTitle || (detail ? '机器详情' : '概览');
 }
 window.addEventListener('hashchange', syncNavigation); syncNavigation();
+// Old anchor bookmarks now lead to dedicated pages.
+if (location.pathname === '/' && ['clients','onboard','reserved','api-tokens','account'].includes(location.hash.slice(1))) {
+  location.replace('/' + location.hash.slice(1));
+}
+if (location.pathname.startsWith('/clients/') && new URLSearchParams(location.search).get('ok') === 'rule created') {
+  try { sessionStorage.removeItem('opennofrp-tunnel-draft:' + location.pathname + '/rules'); } catch (_) { /* Storage is optional. */ }
+}
 
 document.querySelectorAll('[data-table-search]').forEach(input => {
   const table = document.querySelector(input.dataset.tableSearch);
@@ -106,10 +113,10 @@ if (editor) {
   // Keep unselected protocol fields from blocking native browser validation.
   function syncProtocol() {
     const selected = editor.querySelector('[name="protocol"]:checked');
-    editor.querySelectorAll('#rule-step2 input, #rule-step2 select, #rule-step2 textarea').forEach(control => {
-      control.disabled = !selected || Boolean(control.closest('[hidden]'));
-    });
     syncGroups();
+    editor.querySelectorAll('#rule-step2 input, #rule-step2 select, #rule-step2 textarea').forEach(control => {
+      control.disabled = !selected || Boolean(control.closest('[data-proto-show][hidden], .tls-custom[hidden], .advanced-group[hidden]'));
+    });
   }
   editor.addEventListener('change', syncProtocol); syncProtocol();
   const preview = document.createElement('div'); preview.className = 'connection-preview'; preview.setAttribute('aria-live', 'polite');
