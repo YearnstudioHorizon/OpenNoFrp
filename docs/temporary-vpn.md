@@ -30,6 +30,36 @@
    SSH、数据库等也使用 `10.203.0.1` 和原服务端口。
 5. 按 Ctrl+C 正常断开，或在面板撤销凭据。到期自动断开。
 
+## 可选 HOST 别名
+
+创建接入时可填写 `HOST 别名`，例如 `local`。程序在服务端认证成功、
+虚拟网卡配置完成后，将 `local` 写入接入设备的系统 hosts 文件，指向 `10.203.0.1`。
+之后可直接打开 `http://local:8080`，或使用 `ssh 用户名@local`。
+配置中使用 `"hosts": ["local"]`；最多 8 个别名，面板使用逗号分隔。
+留空时不修改 hosts，旧配置继续按原方式使用 IP 地址。
+
+也可在启动时指定别名，覆盖配置中的 `hosts`：
+
+```powershell
+.\opennofrp-vpn-windows-amd64.exe -config .\opennofrp-vpn.json -host local
+```
+
+```sh
+sudo ./opennofrp-vpn-linux-amd64 -config ./opennofrp-vpn.json -host local,dev.internal
+```
+
+程序不会覆盖已有的不同 IP 映射；遇到冲突会报错退出并清理本次创建的网卡。
+已有相同 IP 的映射会保留。新条目带有每次启动独有的注释标记，正常退出、
+到期或被撤销时，仅删除本次添加且未被别人修改的条目，不恢复整份旧文件。
+拒绝使用 `localhost`、IP 地址、不合法的域名以及服务器控制地址作为别名。
+写入保持原文件权限和所有者，Linux 支持绑定挂载的 hosts 文件。
+Windows 写入及清理后刷新系统 DNS 缓存；Linux 不重启解析服务。
+浏览器和应用自身的缓存可能需要重新打开连接。
+
+强制结束进程或设备断电时无法保证清理；若条目残留，可在系统 hosts 中删除
+对应 `# OpenNoFrp temporary VPN ...` 标记的行。Linux 为 `/etc/hosts`，
+Windows 为系统目录下的 `System32\drivers\etc\hosts`。
+
 Windows 接入程序内置官方 Wintun 0.14.1 AMD64 签名 DLL，首次运行解压到程序目录，
 该目录需要可写；若已有不同内容的 `wintun.dll`，请放到单独目录再运行。
 Linux 需要 `iproute2`、可用的 `/dev/net/tun` 和 root / 相应网络权限。

@@ -21,6 +21,7 @@ import (
 	"opennofrp/pkg/protocol"
 	"opennofrp/pkg/tempvpn"
 	"opennofrp/pkg/version"
+	"opennofrp/vpn/internal/hosts"
 	"opennofrp/vpn/internal/network"
 )
 
@@ -30,16 +31,17 @@ func main() {
 		return
 	}
 	file := flag.String("config", "opennofrp-vpn.json", "从面板下载的临时 VPN 配置文件")
+	host := flag.String("host", "", "可选 HOST 别名，例如 local；多个用逗号分隔，覆盖配置中的 hosts")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, *file); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(ctx, *file, *host); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "临时 VPN 已断开：", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, path string) error {
+func run(ctx context.Context, path, hostOverride string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -51,11 +53,24 @@ func run(ctx context.Context, path string) error {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return err
 	}
+	if hostOverride != "" {
+		config.Hosts = strings.Split(hostOverride, ",")
+	}
+	config.Hosts, err = tempvpn.NormalizeHosts(config.Hosts)
+	if err != nil {
+		return err
+	}
 	if len(tlsutil.NormalizeFingerprint(config.Fingerprint)) != 64 || !strings.HasPrefix(config.Token, "onfr_vpn_") || config.ExpiresAt <= time.Now().Unix() {
 		return fmt.Errorf("配置无效或已过期，请重新从面板创建临时 VPN")
 	}
-	if _, _, err := net.SplitHostPort(config.Server); err != nil {
+	serverHost, _, err := net.SplitHostPort(config.Server)
+	if err != nil {
 		return fmt.Errorf("服务端地址无效：%w", err)
+	}
+	for _, name := range config.Hosts {
+		if strings.EqualFold(strings.TrimSuffix(serverHost, "."), name) {
+			return fmt.Errorf("HOST 别名不能与服务端控制地址相同")
+		}
 	}
 	deadlineCtx, cancel := context.WithDeadline(ctx, time.Unix(config.ExpiresAt, 0))
 	defer cancel()
@@ -97,6 +112,18 @@ func run(ctx context.Context, path string) error {
 		return err
 	}
 	defer cleanup()
+	cleanupHosts, err := hosts.Install(config.Hosts, response.VirtualIP)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := cleanupHosts(); err != nil {
+			fmt.Fprintln(os.Stderr, "清理 HOST 映射失败，请检查系统 hosts 文件：", err)
+		}
+	}()
+	if len(config.Hosts) > 0 {
+		fmt.Printf("HOST 映射：%s -> %s\n", strings.Join(config.Hosts, ", "), response.VirtualIP)
+	}
 	runCtx, stopRun := context.WithDeadline(deadlineCtx, time.Unix(response.ExpiresAt, 0))
 	defer stopRun()
 	go func() {

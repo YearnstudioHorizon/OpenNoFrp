@@ -84,6 +84,15 @@ func (p *Panel) handleVPNCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name, clientID := strings.TrimSpace(r.FormValue("name")), r.FormValue("client_id")
+	aliases := []string{}
+	if value := strings.TrimSpace(r.FormValue("hosts")); value != "" {
+		aliases = strings.FieldsFunc(value, func(c rune) bool { return c == ',' || c == ' ' || c == '\n' || c == '\t' || c == '\r' })
+	}
+	aliases, err := tempvpn.NormalizeHosts(aliases)
+	if err != nil {
+		p.renderVPN(w, r, err.Error(), "")
+		return
+	}
 	minutes, err := strconv.Atoi(r.FormValue("minutes"))
 	if err != nil || (minutes != 15 && minutes != 60 && minutes != 240 && minutes != 1440) || name == "" || len(name) > 120 {
 		p.renderVPN(w, r, "请填写名称并选择有效期；名称最多 120 字节。", "")
@@ -113,13 +122,19 @@ func (p *Panel) handleVPNCreate(w http.ResponseWriter, r *http.Request) {
 		p.renderVPN(w, r, "请先配置服务端对外控制地址、端口及 TLS 指纹。", "")
 		return
 	}
+	for _, alias := range aliases {
+		if strings.EqualFold(strings.TrimSuffix(host, "."), alias) {
+			p.renderVPN(w, r, "HOST 别名不能与服务端控制地址相同。", "")
+			return
+		}
+	}
 	lease, token, err := p.Store.CreateTemporaryVPN(r.Context(), clientID, name, time.Duration(minutes)*time.Minute)
 	if err != nil {
 		p.Logger.Error("create temporary VPN", "error", err)
 		p.renderVPN(w, r, "创建失败，请检查目标机器是否存在。", "")
 		return
 	}
-	config, _ := json.MarshalIndent(tempvpn.Config{Server: net.JoinHostPort(host, strconv.Itoa(p.ControlPort)), Fingerprint: p.Fingerprint, Token: token, ExpiresAt: lease.ExpiresAt.Unix()}, "", "  ")
+	config, _ := json.MarshalIndent(tempvpn.Config{Server: net.JoinHostPort(host, strconv.Itoa(p.ControlPort)), Fingerprint: p.Fingerprint, Token: token, ExpiresAt: lease.ExpiresAt.Unix(), Hosts: aliases}, "", "  ")
 	p.renderVPN(w, r, "", string(config))
 }
 

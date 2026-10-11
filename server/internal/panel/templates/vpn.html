@@ -20,6 +20,7 @@ sudo ./opennofrp-vpn-linux-amd64 -config ./opennofrp-vpn.json</code></pre></li>
       <div class="field"><label for="vpn-target">目标机器</label><select name="client_id" id="vpn-target" required><option value="">选择内网机器</option>{{range .Targets}}<option value="{{.ID}}" {{if not .Ready}}disabled{{end}}>{{.Name}}{{if not .Ready}}（离线或需更新 Client）{{end}}</option>{{end}}</select></div>
       <div class="field"><label for="vpn-name">接入名称</label><input name="name" id="vpn-name" required maxlength="40" placeholder="例如：临时维护电脑" autocomplete="off"></div>
       <div class="field"><label for="vpn-expiry">有效期</label><select name="minutes" id="vpn-expiry"><option value="15">15 分钟</option><option value="60" selected>1 小时</option><option value="240">4 小时</option><option value="1440">24 小时</option></select></div>
+      <div class="field"><label for="vpn-hosts">HOST 别名（可选）</label><input name="hosts" id="vpn-hosts" placeholder="例如：local" maxlength="2048" autocomplete="off"><span class="help">启动时将别名写入接入设备的 hosts，指向 10.203.0.1，正常断开时清理。例如 http://local:8080。最多 8 个，逗号分隔；留空不修改 hosts。</span></div>
     </div><p class="wizard-tip">连接程序只添加到 10.203.0.1 的单地址路由，不设置默认网关或 DNS。若该地址已有专用路由，程序会拒绝连接。一次连接一台机器。</p><div class="form-actions"><button class="btn btn-primary" type="submit">创建并下载配置</button></div></form>
   </section>
   {{end}}
