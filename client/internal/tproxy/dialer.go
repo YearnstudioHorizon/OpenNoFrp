@@ -80,6 +80,10 @@ func (d SpoofedDialer) DialSpoofed(ctx context.Context, spoofSourceIP net.IP, ta
 		}
 	}
 
+	if err := configureTCPKeepAlive(fd); err != nil {
+		return closeOnErr(err)
+	}
+
 	if err := bindSpoofedSource(fd, ipv4, spoofSourceIP); err != nil {
 		return closeOnErr(err)
 	}
@@ -193,6 +197,22 @@ func connectWithTimeout(ctx context.Context, fd int, ipv4 bool, targetIP net.IP,
 
 	if err := unix.SetNonblock(fd, false); err != nil {
 		return fmt.Errorf("tproxy: clear non-blocking: %w", err)
+	}
+	return nil
+}
+
+// Keep transparent local connections active independently of the yamux transport.
+// A dead peer gets six probes, spaced ten seconds apart, after thirty idle seconds.
+func configureTCPKeepAlive(fd int) error {
+	for _, opt := range []struct{ level, name, value int }{
+		{unix.SOL_SOCKET, unix.SO_KEEPALIVE, 1},
+		{unix.IPPROTO_TCP, unix.TCP_KEEPIDLE, 30},
+		{unix.IPPROTO_TCP, unix.TCP_KEEPINTVL, 10},
+		{unix.IPPROTO_TCP, unix.TCP_KEEPCNT, 6},
+	} {
+		if err := unix.SetsockoptInt(fd, opt.level, opt.name, opt.value); err != nil {
+			return fmt.Errorf("tproxy: TCP keepalive option %d: %w", opt.name, err)
+		}
 	}
 	return nil
 }
