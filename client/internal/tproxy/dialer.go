@@ -96,7 +96,8 @@ func (d SpoofedDialer) DialSpoofed(ctx context.Context, spoofSourceIP net.IP, ta
 	defer file.Close()
 	conn, err := net.FileConn(file)
 	if err != nil {
-		return closeOnErr(fmt.Errorf("tproxy: net.FileConn: %w", err))
+		// file owns fd now; its deferred Close is the only cleanup owner.
+		return nil, fmt.Errorf("tproxy: net.FileConn: %w", err)
 	}
 	return conn, nil
 }

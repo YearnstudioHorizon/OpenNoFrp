@@ -7,8 +7,8 @@ import (
 
 // fileFromFD 将原始文件描述符包装为 *os.File，以便传给 net.FileConn。
 // 就 net.FileConn（其内部会 dup() 该描述符）而言，返回的 *os.File 接管了 fd
-// 的所有权，因此调用方在正常的错误路径中仍应关闭原始 fd；但一旦
-// net.FileConn 成功，就应关闭该 *os.File 本身（net.FileConn 保留的是它的 dup 副本）。
+// 的所有权。之后无论 net.FileConn 成功或失败，都只能关闭该 *os.File，
+// 不能再直接关闭 fd；成功时 net.FileConn 保留的是它的 dup 副本。
 func fileFromFD(fd int) *os.File {
 	return os.NewFile(uintptr(fd), "opennofrp-tproxy-upstream")
 }
