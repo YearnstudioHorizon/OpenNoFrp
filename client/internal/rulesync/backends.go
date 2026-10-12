@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"opennofrp/pkg/netrelay"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,3 +177,5 @@ func (p *backendPool) healthLoop(ctx context.Context, rules func() []protocol.Ru
 		}
 	}
 }
+
+func (c *touchConn) CloseWrite() error { return netrelay.CloseWrite(c.Conn) }

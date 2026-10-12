@@ -9,9 +9,9 @@ package forwarder
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
+	"opennofrp/pkg/netrelay"
 
 	"opennofrp/client/internal/tproxy"
 )
@@ -116,18 +116,7 @@ func (f *TCPForwarder) handleConn(ctx context.Context, clientConn net.Conn) {
 }
 
 // relay 在两个连接之间双向传输字节，直到任一端关闭或出错。
-func relay(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(a, b)
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(b, a)
-		done <- struct{}{}
-	}()
-	<-done
-}
+func relay(a, b net.Conn) { _ = netrelay.Relay(a, b) }
 
 // DialPlain 在不做任何源 IP 伪造的情况下连接本地服务。用于 PreserveSourceIP=false
 // 的规则，或作为 OpenNoFrp 在 TPROXY 无法生效的 Docker bridge 网络目标上的回退

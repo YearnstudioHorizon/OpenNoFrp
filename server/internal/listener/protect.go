@@ -10,6 +10,7 @@ package listener
 import (
 	"fmt"
 	"net"
+	"opennofrp/pkg/netrelay"
 	"strings"
 	"sync"
 	"time"
@@ -289,3 +290,7 @@ func (m *Manager) guardFor(ruleID uint32) *ruleGuard {
 	defer m.guardMu.Unlock()
 	return m.guards[ruleID]
 }
+
+func (c *releaseConn) CloseWrite() error { return netrelay.CloseWrite(c.Conn) }
+
+func (c *throttledConn) CloseWrite() error { return netrelay.CloseWrite(c.Conn) }

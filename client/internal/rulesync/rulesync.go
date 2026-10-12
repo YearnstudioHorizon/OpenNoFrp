@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"opennofrp/pkg/netrelay"
 	"sync"
 
 	"opennofrp/client/internal/envcheck"
@@ -392,38 +393,7 @@ func dialPlain(ctx context.Context, addr string) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", addr)
 }
 
-func relay(a, b net.Conn) {
-	done := make(chan error, 2)
-	cp := func(dst, src net.Conn) {
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := src.Read(buf)
-			if n > 0 {
-				if _, werr := dst.Write(buf[:n]); werr != nil {
-					break
-				}
-			}
-			if err != nil {
-				if err == io.EOF {
-					if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-						_ = cw.CloseWrite()
-					}
-					done <- nil
-					return
-				}
-				break
-			}
-		}
-		done <- fmt.Errorf("relay direction closed")
-	}
-	go cp(a, b)
-	go cp(b, a)
-	if err := <-done; err != nil {
-		_ = a.Close()
-		_ = b.Close()
-	}
-	<-done
-}
+func relay(a, b net.Conn) { _ = netrelay.Relay(a, b) }
 
 // 在流上对 UDP 分帧：每个数据报格式为 [uint16 大端序长度][payload]。
 // 第一个（携带元数据的）方向在分帧开始之前，其头部已被 ReadStreamMetadata 读取消费。
@@ -506,3 +476,5 @@ func readFull(r net.Conn, buf []byte) (int, error) {
 	}
 	return total, nil
 }
+
+func (c *ackConn) CloseWrite() error { return netrelay.CloseWrite(c.Conn) }

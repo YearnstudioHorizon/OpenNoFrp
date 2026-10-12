@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"opennofrp/pkg/netrelay"
 	"sync"
 	"time"
 
@@ -224,38 +225,8 @@ func (s *Session) OpenAckStream(clientIP net.IP, clientPort uint16, ruleID uint3
 // ErrBackendUnavailable 表示 Client 无法连接其本地服务（或未及时确认）。
 var ErrBackendUnavailable = errors.New("session: backend unavailable")
 
-func relay(publicConn net.Conn, stream net.Conn, logger *slog.Logger) {
-	defer publicConn.Close()
-	defer stream.Close()
-
-	done := make(chan error, 2)
-	cp := func(dst, src net.Conn) {
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := src.Read(buf)
-			if n > 0 {
-				if _, werr := dst.Write(buf[:n]); werr != nil {
-					break
-				}
-			}
-			if err != nil {
-				if err == io.EOF {
-					if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-						_ = cw.CloseWrite()
-					}
-					done <- nil
-					return
-				}
-				break
-			}
-		}
-		done <- fmt.Errorf("relay direction closed")
+func relay(publicConn, stream net.Conn, logger *slog.Logger) {
+	if err := netrelay.Relay(publicConn, stream); err != nil {
+		logger.Debug("TCP relay ended with error", "error", err)
 	}
-	go cp(publicConn, stream)
-	go cp(stream, publicConn)
-	if err := <-done; err != nil {
-		_ = publicConn.Close()
-		_ = stream.Close()
-	}
-	<-done
 }

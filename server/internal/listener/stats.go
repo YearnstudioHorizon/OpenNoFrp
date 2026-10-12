@@ -6,6 +6,7 @@ package listener
 
 import (
 	"net"
+	"opennofrp/pkg/netrelay"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -175,3 +176,5 @@ func (m *Manager) Stats() []RuleStats {
 	}
 	return out
 }
+
+func (c *countingConn) CloseWrite() error { return netrelay.CloseWrite(c.Conn) }
