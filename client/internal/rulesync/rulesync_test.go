@@ -3,9 +3,11 @@ package rulesync
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"net"
 	"reflect"
 	"testing"
+	"time"
 
 	"opennofrp/pkg/protocol"
 )
@@ -119,14 +121,19 @@ func TestTouchConn(t *testing.T) {
 	if tc.touched.Load() {
 		t.Fatal("touched before use")
 	}
-	if err := tc.Close(); err != nil {
-		t.Fatal(err)
-	}
+	a.SetDeadline(time.Now().Add(time.Second))
+	b.SetDeadline(time.Now().Add(time.Second))
 	go b.Read(make([]byte, 1))
 	if _, err := tc.Write([]byte{1}); err != nil {
-		t.Fatalf("Close must not close the underlying stream: %v", err)
+		t.Fatalf("write failed: %v", err)
 	}
 	if !tc.touched.Load() {
 		t.Errorf("write did not mark touched")
+	}
+	if err := tc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tc.Write([]byte{1}); err != io.ErrClosedPipe {
+		t.Fatalf("Close must close the underlying stream: %v", err)
 	}
 }
