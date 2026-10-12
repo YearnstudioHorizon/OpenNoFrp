@@ -128,8 +128,8 @@ func (t *touchConn) Write(p []byte) (int, error) {
 	return t.Conn.Write(p)
 }
 
-// Close 不向下传递：stream 的生命周期由 ServeStream 管理，换后端重试时不能关闭它。
-func (t *touchConn) Close() error { return nil }
+// Close is inherited from net.Conn so relay errors can unblock the opposite
+// direction. Failed backend dials never enter relay or close this wrapper.
 
 func (p *backendPool) markFailed(addr string) {
 	p.mu.Lock()
