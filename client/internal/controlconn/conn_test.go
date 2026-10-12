@@ -47,3 +47,31 @@ func TestRunOnceCancellationDuringTLSHandshake(t *testing.T) {
 		t.Fatal("canceled connection remained blocked")
 	}
 }
+
+func TestReconnectBackoffResetsAfterEstablishedSession(t *testing.T) {
+	c := Client{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var attempts []time.Time
+	c.runReconnectLoop(ctx, func(context.Context) error {
+		attempts = append(attempts, time.Now())
+		if len(attempts) == 3 {
+			c.connectionEstablished = true
+		}
+		if len(attempts) == 4 {
+			cancel()
+		}
+		return io.ErrUnexpectedEOF
+	}, 50*time.Millisecond, 400*time.Millisecond)
+	if len(attempts) != 4 {
+		t.Fatalf("attempts: %d", len(attempts))
+	}
+	failureDelay := attempts[2].Sub(attempts[1])
+	resetDelay := attempts[3].Sub(attempts[2])
+	if failureDelay < 90*time.Millisecond {
+		t.Fatalf("consecutive failures did not back off: %v", failureDelay)
+	}
+	if resetDelay >= 150*time.Millisecond {
+		t.Fatalf("successful session did not reset backoff: %v", resetDelay)
+	}
+}

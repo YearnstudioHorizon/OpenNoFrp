@@ -62,13 +62,17 @@ type Client struct {
 
 	seq                     uint64
 	lastObservedFingerprint string
+	connectionEstablished   bool
 }
 
 // Run 连接到 Server 并持续服务该连接直到 ctx 被取消，失败时以指数退避
 // 自动重连。本函数仅在 ctx 被取消时返回。
 func (c *Client) Run(ctx context.Context) {
-	backoff := time.Duration(c.Cfg.Server.ReconnectMinSeconds) * time.Second
-	maxBackoff := time.Duration(c.Cfg.Server.ReconnectMaxSeconds) * time.Second
+	c.runReconnectLoop(ctx, c.runOnce, time.Duration(c.Cfg.Server.ReconnectMinSeconds)*time.Second, time.Duration(c.Cfg.Server.ReconnectMaxSeconds)*time.Second)
+}
+
+func (c *Client) runReconnectLoop(ctx context.Context, connect func(context.Context) error, minBackoff, maxBackoff time.Duration) {
+	backoff := minBackoff
 
 	for {
 		select {
@@ -77,7 +81,11 @@ func (c *Client) Run(ctx context.Context) {
 		default:
 		}
 
-		err := c.runOnce(ctx)
+		c.connectionEstablished = false
+		err := connect(ctx)
+		if c.connectionEstablished {
+			backoff = minBackoff
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -161,6 +169,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 		return fmt.Errorf("controlconn: open control stream: %w", err)
 	}
 	defer ctrlStream.Close()
+	c.connectionEstablished = true
 
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
 	defer cancelHeartbeat()
