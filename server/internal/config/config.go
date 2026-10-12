@@ -17,6 +17,9 @@ type Config struct {
 
 // ServerConfig 描述 Server/面板进程的监听地址以及数据目录布局。
 type ServerConfig struct {
+	// Bound public TCP relays independently of optional per-rule protection.
+	MaxTCPConnections     int `toml:"max_tcp_connections"`
+	TCPIdleTimeoutSeconds int `toml:"tcp_idle_timeout_seconds"`
 	// BindAddr 是控制端口绑定的地址（Client 连接到这里）。
 	BindAddr string `toml:"bind_addr"` // 例如 "0.0.0.0"
 	// ControlPort 是 Client 用于握手/心跳的 TCP 端口。
@@ -84,6 +87,12 @@ func Load(path string) (*Config, error) {
 }
 
 func applyDefaults(cfg *Config) {
+	if cfg.Server.MaxTCPConnections == 0 {
+		cfg.Server.MaxTCPConnections = 512
+	}
+	if cfg.Server.TCPIdleTimeoutSeconds == 0 {
+		cfg.Server.TCPIdleTimeoutSeconds = 300
+	}
 	if cfg.Server.BindAddr == "" {
 		cfg.Server.BindAddr = "0.0.0.0"
 	}
@@ -120,6 +129,9 @@ func applyDefaults(cfg *Config) {
 }
 
 func validate(cfg *Config) error {
+	if cfg.Server.MaxTCPConnections < 1 || cfg.Server.TCPIdleTimeoutSeconds < 1 {
+		return fmt.Errorf("server TCP connection limit and idle timeout must be positive")
+	}
 	if cfg.Server.ControlPort <= 0 || cfg.Server.ControlPort > 65535 {
 		return fmt.Errorf("server.control_port must be 1-65535, got %d", cfg.Server.ControlPort)
 	}
@@ -152,6 +164,10 @@ panel_port = 8080
 # metrics_token = "change-me"
 
 heartbeat_timeout_seconds = 90
+# Total public TCP connections, including pending backend opens.
+max_tcp_connections = 512
+# Close TCP forwards after this many seconds without traffic in either direction.
+tcp_idle_timeout_seconds = 300
 db_path = "/var/lib/opennofrp/opennofrp.db"
 client_bin_dir = "/opt/opennofrp/client-bins"
 # public_base_url = "https://frp.example.com:8080"  # used in generated install commands

@@ -378,6 +378,9 @@ ExecStart=$BINARY_DEST -c $CONFIG_FILE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=2
+# Keep tunnel resource exhaustion inside this service, preserving host access.
+MemoryHigh=40%
+MemoryMax=50%
 
 [Install]
 WantedBy=multi-user.target

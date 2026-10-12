@@ -139,6 +139,8 @@ func runServer() {
 		sessions: make(map[string]*session.Session),
 	}
 	s.listener = listener.NewManager(cfg.Server.BindAddr, logger, s.sessionFor)
+	s.listener.MaxTCPConnections = cfg.Server.MaxTCPConnections
+	s.listener.TCPIdleTimeout = time.Duration(cfg.Server.TCPIdleTimeoutSeconds) * time.Second
 	s.listener.SetACME(listener.ACMEConfig{
 		Email:        cfg.Server.ACMEEmail,
 		CacheDir:     cfg.Server.ACMECacheDir,
@@ -231,8 +233,9 @@ func runServer() {
 }
 
 type server struct {
-	clientUpdates sync.Map // client ID -> in-flight update
-	activeVPN     sync.Map // temporary VPN ID -> active lease
+	rulesMu       sync.Mutex // serialize listener reconciliation and snapshot publication
+	clientUpdates sync.Map   // client ID -> in-flight update
+	activeVPN     sync.Map   // temporary VPN ID -> active lease
 	cfg           *config.Config
 	logger        *slog.Logger
 	store         *store.Store
@@ -271,6 +274,8 @@ func (s *server) unregisterSession(sess *session.Session) {
 // 向每个已连接的 Client 推送一份最新快照（每个 Client 只会收到属于自己的
 // 已启用规则）。
 func (s *server) onAnyRuleChanged() {
+	s.rulesMu.Lock()
+	defer s.rulesMu.Unlock()
 	ctx := context.Background()
 	s.reconcileListeners(ctx)
 

@@ -111,10 +111,15 @@ type Manager struct {
 	Logger   *slog.Logger
 	Lookup   SessionLookup
 
-	mu   sync.Mutex
-	tcp  map[uint16]*tcpListener
-	udp  map[uint16]*udpListener
-	http map[uint16]*httpListener
+	reconcileMu sync.Mutex
+	// MaxTCPConnections and TCPIdleTimeout must be set before opening listeners.
+	MaxTCPConnections int
+	TCPIdleTimeout    time.Duration
+	tcpActive         int
+	mu                sync.Mutex
+	tcp               map[uint16]*tcpListener
+	udp               map[uint16]*udpListener
+	http              map[uint16]*httpListener
 	// tlsPass 是 TLS 透传（SNI 路由）监听器，见 sni.go。
 	tlsPass map[uint16]*tlsPassListener
 
@@ -136,6 +141,9 @@ type tcpListener struct {
 	clientID string
 	offset   uint16 // 端口段规则中的端口偏移
 	done     chan struct{}
+	connMu   sync.Mutex
+	closed   bool
+	conns    map[*trackedTCPConn]struct{}
 }
 
 type udpListener struct {
@@ -158,15 +166,17 @@ type udpFlow struct {
 
 func NewManager(bindAddr string, logger *slog.Logger, lookup SessionLookup) *Manager {
 	return &Manager{
-		BindAddr: bindAddr,
-		Logger:   logger,
-		Lookup:   lookup,
-		tcp:      make(map[uint16]*tcpListener),
-		udp:      make(map[uint16]*udpListener),
-		http:     make(map[uint16]*httpListener),
-		tlsPass:  make(map[uint16]*tlsPassListener),
-		guards:   make(map[uint32]*ruleGuard),
-		stats:    make(map[uint32]*ruleCounters),
+		BindAddr:          bindAddr,
+		MaxTCPConnections: 512,
+		TCPIdleTimeout:    5 * time.Minute,
+		Logger:            logger,
+		Lookup:            lookup,
+		tcp:               make(map[uint16]*tcpListener),
+		udp:               make(map[uint16]*udpListener),
+		http:              make(map[uint16]*httpListener),
+		tlsPass:           make(map[uint16]*tlsPassListener),
+		guards:            make(map[uint32]*ruleGuard),
+		stats:             make(map[uint32]*ruleCounters),
 	}
 }
 
@@ -212,7 +222,7 @@ func (m *Manager) openTCP(r ruleView) error {
 	if err != nil {
 		return fmt.Errorf("listener: tcp listen on %s: %w", addr, err)
 	}
-	tl := &tcpListener{ln: ln, ruleID: r.ID, clientID: r.ClientID, offset: r.PortOffset, done: make(chan struct{})}
+	tl := &tcpListener{ln: ln, ruleID: r.ID, clientID: r.ClientID, offset: r.PortOffset, done: make(chan struct{}), conns: make(map[*trackedTCPConn]struct{})}
 	m.tcp[r.Port] = tl
 	go m.tcpAcceptLoop(addr, tl)
 	m.Logger.Info("opened public TCP listener", "port", r.Port, "rule_id", r.ID)
@@ -231,6 +241,17 @@ func (m *Manager) tcpAcceptLoop(_ string, tl *tcpListener) {
 			m.Logger.Error("tcp accept failed, closing listener", "rule_id", tl.ruleID, "error", err)
 			return
 		}
+		if !m.acquireTCP() {
+			m.statRejected(tl.ruleID)
+			conn.Close()
+			continue
+		}
+		tracked := &trackedTCPConn{Conn: conn, listener: tl, manager: m, idle: m.TCPIdleTimeout}
+		if !tl.track(tracked) {
+			tracked.Close()
+			return
+		}
+		conn = tracked
 		g := m.guardFor(tl.ruleID)
 		var ip net.IP
 		if ta, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
@@ -432,12 +453,17 @@ func (m *Manager) reapFlow(ul *udpListener, flow *udpFlow) {
 // 删除时调用。
 func (m *Manager) ClosePort(protocol string, port uint16) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	var stopping *tcpListener
+	defer func() {
+		m.mu.Unlock()
+		if stopping != nil {
+			stopping.stop()
+		}
+	}()
 	switch protocol {
 	case "tcp":
 		if tl, ok := m.tcp[port]; ok {
-			close(tl.done)
-			tl.ln.Close()
+			stopping = tl
 			delete(m.tcp, port)
 			m.Logger.Info("closed public TCP listener", "port", port)
 		}
@@ -484,6 +510,8 @@ func (m *Manager) OpenPorts() map[string]uint32 {
 // 关闭不再需要的端口，并重启所属规则 ID 已变化的端口（规则被删除后以相同
 // 端口重新创建）。
 func (m *Manager) Reconcile(desired []RuleView) {
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
 	m.setGuards(desired)
 	m.pruneStats(desired)
 	want := make(map[string]RuleView)
