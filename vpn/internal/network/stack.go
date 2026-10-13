@@ -27,7 +27,12 @@ type Dial func(context.Context, string, uint16) (net.Conn, error)
 
 // Run intercepts only packets for the authorized virtual IP. The TCP/IP stack
 // terminates flows locally and forwards each destination port over the tunnel.
-func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial) error {
+func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial, diagnostics ...func(string, ...any)) error {
+	var diagnostic func(string, ...any)
+	if len(diagnostics) > 0 {
+		diagnostic = diagnostics[0]
+	}
+	trace := newPacketTrace(diagnostic)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s := stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4}})
@@ -52,6 +57,8 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial) e
 			return
 		}
 		defer func() { <-flows }()
+		id := r.ID()
+		flow := fmt.Sprintf("%s:%d -> %s:%d", id.RemoteAddress, id.RemotePort, id.LocalAddress, id.LocalPort)
 		remote, err := dial(ctx, "tcp", r.ID().LocalPort)
 		if err != nil {
 			r.Complete(true)
@@ -59,13 +66,27 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial) e
 		}
 		defer remote.Close()
 		var q waiter.Queue
+		if diagnostic != nil {
+			diagnostic("TCP 等待本机握手：%s", flow)
+		}
 		endpoint, tcpErr := r.CreateEndpoint(&q)
 		if tcpErr != nil {
+			if diagnostic != nil {
+				diagnostic("TCP 本机握手失败：%s：%s", flow, tcpErr)
+			}
 			r.Complete(true)
 			return
 		}
 		r.Complete(false)
-		tempvpn.Relay(ctx, gonet.NewTCPConn(&q, endpoint), remote)
+		local := gonet.NewTCPConn(&q, endpoint)
+		if diagnostic == nil {
+			tempvpn.Relay(ctx, local, remote)
+			return
+		}
+		diagnostic("TCP 本机握手完成：%s", flow)
+		observed := &diagnosticConn{Conn: local, log: diagnostic, flow: flow}
+		tempvpn.Relay(ctx, observed, remote)
+		diagnostic("TCP 转发结束：%s，发送到目标=%d 字节，返回本机=%d 字节", flow, observed.readBytes.Load(), observed.writeBytes.Load())
 	})
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tf.HandlePacket)
 	uf := udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
@@ -119,7 +140,11 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial) e
 			data := make([]byte, offset+view.Size())
 			copy(data[offset:], view.AsSlice())
 			view.Release()
+			trace.packet("TUN TX", data[offset:])
 			if _, err := device.Write([][]byte{data}, offset); err != nil {
+				if diagnostic != nil {
+					diagnostic("TUN 写入失败：%v", err)
+				}
 				errors <- err
 				return
 			}
@@ -139,6 +164,7 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial) e
 			}
 			for i := 0; i < n; i++ {
 				data := buffers[i][:sizes[i]]
+				trace.packet("TUN RX", data)
 				if len(data) < 20 || data[0]>>4 != 4 || netip.AddrFrom4([4]byte{data[16], data[17], data[18], data[19]}) != target {
 					continue
 				}

@@ -169,7 +169,13 @@ func run(ctx context.Context, path, hostOverride string, verbose bool) error {
 		stream.SetDeadline(time.Time{})
 		return stream, nil
 	}
-	err = network.Run(runCtx, device, netip.MustParseAddr(response.VirtualIP), dial)
+	var diagnostic func(string, ...any)
+	if verbose {
+		diagnostic = func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		}
+	}
+	err = network.Run(runCtx, device, netip.MustParseAddr(response.VirtualIP), dial, diagnostic)
 	if deadlineCtx.Err() != nil {
 		return deadlineCtx.Err()
 	}

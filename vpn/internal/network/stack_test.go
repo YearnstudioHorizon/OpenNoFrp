@@ -2,10 +2,13 @@ package network
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -56,6 +59,21 @@ func (d *packetDevice) Write(bufs [][]byte, offset int) (int, error) {
 }
 
 func TestRunTCPAndCancellation(t *testing.T) {
+	t.Run("normal", func(t *testing.T) { runTCPAndCancellation(t, false) })
+	t.Run("diagnostics", func(t *testing.T) { runTCPAndCancellation(t, true) })
+}
+
+func runTCPAndCancellation(t *testing.T, diagnostics bool) {
+	var logMu sync.Mutex
+	var messages []string
+	var diagnostic func(string, ...any)
+	if diagnostics {
+		diagnostic = func(format string, args ...any) {
+			logMu.Lock()
+			defer logMu.Unlock()
+			messages = append(messages, fmt.Sprintf(format, args...))
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	client := stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol}})
@@ -81,7 +99,7 @@ func TestRunTCPAndCancellation(t *testing.T) {
 			a, b := net.Pipe()
 			go func() { defer b.Close(); io.Copy(b, b) }()
 			return a, nil
-		})
+		}, diagnostic)
 	}()
 	conn, err := gonet.DialContextTCP(ctx, client, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 203, 0, 1}), Port: 3001}, ipv4.ProtocolNumber)
 	if err != nil {
@@ -98,6 +116,19 @@ func TestRunTCPAndCancellation(t *testing.T) {
 	}
 	if string(reply[:]) != "hello" {
 		t.Fatalf("reply %q", reply)
+	}
+	if diagnostics {
+		logMu.Lock()
+		joined := strings.Join(messages, "\n")
+		logMu.Unlock()
+		for _, required := range []string{"TUN RX TCP", "TUN TX TCP", "TCP 本机握手完成", "TCP 收到本机数据", "TCP 收到目标响应"} {
+			if !strings.Contains(joined, required) {
+				t.Errorf("missing %q in diagnostics: %s", required, joined)
+			}
+		}
+		if strings.Contains(joined, "hello") {
+			t.Error("diagnostics disclosed application payload")
+		}
 	}
 	cancel()
 	select {

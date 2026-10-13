@@ -76,6 +76,17 @@ macOS、IPv6 及其它 IP 协议暂不支持。
 
 ## 凭据与连接
 
+访问超时时，可加 `-verbose` 查看目标端口连接、本机 TCP 握手、前 128 个 IP 包头和
+双向转发字节数。诊断不输出应用请求正文或接入凭据。Windows PowerShell 保存日志：
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+.\opennofrp-vpn-windows-arm64.exe -config .\opennofrp-vpn.json -verbose 2>&1 | Tee-Object -FilePath .\vpn-debug.log
+```
+
+根据系统架构替换程序名。`TCP 本机握手完成` 表示本机与虚拟协议栈完成握手；
+`TCP 收到本机数据` 和 `TCP 收到目标响应` 分别确认两侧应用数据进入转发路径。
+
 配置携带服务器控制端点、TLS 证书指纹、临时凭据和到期时间。
 证书指纹固定校验，配置仅在创建后显示一次；数据库只保存临时凭据的 SHA-256 哈希。
 凭据授予所选机器全部回环 TCP / UDP 端口的访问权限，应像密码一样保管。
