@@ -152,19 +152,31 @@ func (p *Panel) handleVPNRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Panel) handleVPNDownload(w http.ResponseWriter, r *http.Request) {
-	names := map[string]string{"windows-amd64": "opennofrp-vpn-windows-amd64.exe", "linux-amd64": "opennofrp-vpn-linux-amd64", "linux-arm64": "opennofrp-vpn-linux-arm64"}
+	names := map[string]string{
+		"windows-amd64": "opennofrp-vpn-windows-amd64.exe",
+		"windows-arm64": "opennofrp-vpn-windows-arm64.exe",
+		"windows-386":   "opennofrp-vpn-windows-386.exe",
+		"linux-amd64":   "opennofrp-vpn-linux-amd64",
+		"linux-arm64":   "opennofrp-vpn-linux-arm64",
+	}
 	name, ok := names[r.PathValue("platform")]
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	if p.ClientBinDir != "" {
+	if r.URL.Query().Get("source") == "local" {
+		if p.ClientBinDir == "" {
+			http.NotFound(w, r)
+			return
+		}
 		file := filepath.Join(p.ClientBinDir, name)
 		if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
 			http.ServeFile(w, r, file)
 			return
 		}
+		http.NotFound(w, r)
+		return
 	}
 	http.Redirect(w, r, "https://github.com/"+updater.GitHubRepo+"/releases/latest/download/"+name, http.StatusFound)
 }

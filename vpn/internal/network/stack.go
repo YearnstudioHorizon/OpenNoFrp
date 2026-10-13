@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 
 	"golang.zx2c4.com/wireguard/tun"
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -97,9 +98,11 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial) e
 		defer packet.DecRef()
 		return uf.HandlePacket(id, packet)
 	})
-	stop := context.AfterFunc(ctx, func() { device.Close(); ep.Close() })
+	var closeOnce sync.Once
+	closeNetwork := func() { closeOnce.Do(func() { device.Close(); ep.Close() }) }
+	stop := context.AfterFunc(ctx, closeNetwork)
 	defer stop()
-	defer func() { cancel(); device.Close(); ep.Close() }()
+	defer func() { cancel(); closeNetwork() }()
 	errors := make(chan error, 2)
 	go func() {
 		for {

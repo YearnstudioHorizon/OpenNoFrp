@@ -1,11 +1,10 @@
-//go:build windows && amd64
+//go:build windows && (amd64 || arm64 || 386)
 
 package network
 
 import (
 	"bytes"
 	"crypto/rand"
-	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -16,9 +15,6 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/tun"
 )
-
-//go:embed assets/wintun-amd64.dll
-var wintunDLL []byte
 
 func loadDriver() error {
 	executable, err := os.Executable()

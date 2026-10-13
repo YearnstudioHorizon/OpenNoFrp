@@ -19,6 +19,9 @@
    .\opennofrp-vpn-windows-amd64.exe -config .\opennofrp-vpn.json
    ```
 
+   Windows ARM64 使用 `opennofrp-vpn-windows-arm64.exe`，Windows x86（32 位）使用
+   `opennofrp-vpn-windows-386.exe`，运行方式相同。请优先使用与系统架构一致的版本。
+
    Linux x64 使用 root 权限（ARM64 替换文件名为 `opennofrp-vpn-linux-arm64`）：
 
    ```sh
@@ -60,10 +63,10 @@ Windows 写入及清理后刷新系统 DNS 缓存；Linux 不重启解析服务�
 对应 `# OpenNoFrp temporary VPN ...` 标记的行。Linux 为 `/etc/hosts`，
 Windows 为系统目录下的 `System32\drivers\etc\hosts`。
 
-Windows 接入程序内置官方 Wintun 0.14.1 AMD64 签名 DLL，首次运行解压到程序目录，
+Windows 接入程序内置官方 Wintun 0.14.1 对应架构（AMD64 / ARM64 / x86）的签名 DLL，首次运行解压到程序目录，
 该目录需要可写；若已有不同内容的 `wintun.dll`，请放到单独目录再运行。
 Linux 需要 `iproute2`、可用的 `/dev/net/tun` 和 root / 相应网络权限。
-Windows ARM64、macOS、IPv6 及其它 IP 协议暂不支持。
+macOS、IPv6 及其它 IP 协议暂不支持。
 
 只添加 `10.203.0.1/32` 的临时路由，不设置默认网关、DNS 或系统代理。
 接入程序检查该地址是否已存在专用路由，冲突时拒绝启动；一次连接一台目标机器。
@@ -86,14 +89,17 @@ TCP / UDP 会由目标 Client 建立到回环服务的新连接；目标服务�
 
 ## 发布和托管
 
-发布工作流生成 `opennofrp-vpn-windows-amd64.exe`、`opennofrp-vpn-linux-amd64`、
+发布工作流生成 `opennofrp-vpn-windows-amd64.exe`、`opennofrp-vpn-windows-arm64.exe`、
+`opennofrp-vpn-windows-386.exe`、`opennofrp-vpn-linux-amd64`、
 `opennofrp-vpn-linux-arm64`，同时打入对应平台压缩包。
-可把这些文件放进 Server 的 `client_bin_dir`，面板从本地提供下载；
-未托管时跳转到最新 GitHub Release 的同名文件，发布包含此功能的版本前该链接不可用。
+面板默认跳转到最新 GitHub Release 的同名文件，发布包含对应产物的版本前该链接不可用。
+可把这些文件放进 Server 的 `client_bin_dir`，GitHub 无法访问时使用页面中的服务器备用下载。
+备用入口为 `/vpn/download/<平台>?source=local`；未托管对应文件时返回 404。
 
 Wintun 来自官方 <https://www.wintun.net/> 的 `wintun-0.14.1.zip`，
 原始压缩包 SHA-256：`07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51`。
 随附许可见 `vpn/internal/network/assets/WINTUN-LICENSE.txt`，发布包同样包含许可。
 WireGuard Go / Wintun Go 绑定以及 gVisor 按各项目许可证使用（对应版本见 `go.mod`）。
 
-本次开发仅进行代码审查和交叉编译，未进行 VPN 运行测试或网卡 / 路由变更。
+自动测试使用模拟 TUN 和独立 TCP/IP 栈验证 TCP 收发及取消清理；
+交叉编译覆盖 Windows AMD64 / ARM64 / x86。未进行真实网卡 / 路由变更测试。

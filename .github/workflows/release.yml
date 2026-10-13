@@ -28,6 +28,12 @@ jobs:
           - goos: windows
             goarch: amd64
             build_client: false
+          - goos: windows
+            goarch: arm64
+            build_client: false
+          - goos: windows
+            goarch: '386'
+            build_client: false
 
     steps:
       - name: Checkout Code

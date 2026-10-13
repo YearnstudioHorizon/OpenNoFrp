@@ -32,16 +32,17 @@ func main() {
 	}
 	file := flag.String("config", "opennofrp-vpn.json", "从面板下载的临时 VPN 配置文件")
 	host := flag.String("host", "", "可选 HOST 别名，例如 local；多个用逗号分隔，覆盖配置中的 hosts")
+	verbose := flag.Bool("verbose", false, "显示目标端口连接诊断日志")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, *file, *host); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(ctx, *file, *host, *verbose); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "临时 VPN 已断开：", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, path, hostOverride string) error {
+func run(ctx context.Context, path, hostOverride string, verbose bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -136,7 +137,17 @@ func run(ctx context.Context, path, hostOverride string) error {
 	stopSession := context.AfterFunc(runCtx, func() { ym.Close() })
 	defer stopSession()
 	fmt.Printf("临时 VPN 已连接。访问 10.203.0.1:<原端口> 即访问目标机器的 127.0.0.1:<原端口>。\n支持 TCP / UDP；到期或按 Ctrl+C 后断开。有效至 %s\n", time.Unix(response.ExpiresAt, 0).Local().Format(time.RFC3339))
-	dial := func(ctx context.Context, kind string, port uint16) (net.Conn, error) {
+	dial := func(ctx context.Context, kind string, port uint16) (result net.Conn, dialErr error) {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "收到 VPN 端口请求：%s 127.0.0.1:%d\n", kind, port)
+		}
+		defer func() {
+			if dialErr != nil && ctx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "连接目标 127.0.0.1:%d (%s) 失败：%v\n", port, kind, dialErr)
+			} else if verbose && dialErr == nil {
+				fmt.Fprintf(os.Stderr, "目标端口已连接：%s 127.0.0.1:%d\n", kind, port)
+			}
+		}()
 		stream, err := ym.Open()
 		if err != nil {
 			return nil, err
