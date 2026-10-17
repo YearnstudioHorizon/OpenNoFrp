@@ -15,5 +15,13 @@ const ControlWriteTimeout = 30 * time.Second
 func TunnelYamuxConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
 	cfg.ConnectionWriteTimeout = 60 * time.Second
+	cfg.MaxStreamWindowSize = 1024 * 1024 // 1MB stream window for high throughput WAN transfers
+	return cfg
+}
+
+// VPNYamuxConfig configures yamux sessions dedicated to temporary VPN access.
+func VPNYamuxConfig() *yamux.Config {
+	cfg := TunnelYamuxConfig()
+	cfg.StreamOpenTimeout = 15 * time.Second
 	return cfg
 }

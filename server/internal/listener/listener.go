@@ -156,12 +156,14 @@ type udpListener struct {
 }
 
 type udpFlow struct {
-	remote  *net.UDPAddr
-	stream  net.Conn
-	act     chan struct{} // 接收来自解复用循环的客户端数据报
-	writeQ  chan []byte   // 有界队列，避免慢客户端阻塞整个 UDP 监听器
-	release func()        // 释放规则防护的并发流计数（见 protect.go）
-	guard   *ruleGuard
+	remote    *net.UDPAddr
+	stream    net.Conn
+	act       chan struct{} // 接收来自解复用循环的客户端数据报
+	writeQ    chan []byte   // 有界队列，避免慢客户端阻塞整个 UDP 监听器
+	release   func()        // 释放规则防护的并发流计数（见 protect.go）
+	guard     *ruleGuard
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func NewManager(bindAddr string, logger *slog.Logger, lookup SessionLookup) *Manager {
@@ -346,7 +348,7 @@ func (m *Manager) udpLoop(ul *udpListener) {
 				continue
 			}
 			done := m.statOpened(ul.ruleID)
-			flow = &udpFlow{remote: remote, stream: stream, act: make(chan struct{}, 64), writeQ: make(chan []byte, 64), release: func() { release(); done() }, guard: g}
+			flow = &udpFlow{remote: remote, stream: stream, act: make(chan struct{}, 64), writeQ: make(chan []byte, 64), release: func() { release(); done() }, guard: g, done: make(chan struct{})}
 			m.mu.Lock()
 			ul.flows[key] = flow
 			m.mu.Unlock()
@@ -386,11 +388,16 @@ func (m *Manager) udpFlowTX(ul *udpListener, flow *udpFlow) {
 		select {
 		case <-flow.act:
 			if !t.Stop() {
-				<-t.C
+				select {
+				case <-t.C:
+				default:
+				}
 			}
 			t.Reset(120 * time.Second)
 		case <-t.C:
 			m.reapFlow(ul, flow)
+			return
+		case <-flow.done:
 			return
 		case <-ul.done:
 			m.reapFlow(ul, flow)
@@ -407,6 +414,8 @@ func (m *Manager) udpFlowWriter(ul *udpListener, flow *udpFlow) {
 				m.reapFlow(ul, flow)
 				return
 			}
+		case <-flow.done:
+			return
 		case <-ul.done:
 			return
 		}
@@ -442,6 +451,10 @@ func (m *Manager) reapFlow(ul *udpListener, flow *udpFlow) {
 	}
 	m.mu.Unlock()
 	if ok {
+		flow.closeOnce.Do(func() {
+			close(flow.done)
+		})
+		_ = flow.stream.SetDeadline(time.Now())
 		flow.stream.Close()
 		if flow.release != nil {
 			flow.release()
@@ -484,6 +497,10 @@ func (m *Manager) reapFlowLocked(ul *udpListener, key string) {
 	flow, ok := ul.flows[key]
 	if ok {
 		delete(ul.flows, key)
+		flow.closeOnce.Do(func() {
+			close(flow.done)
+		})
+		_ = flow.stream.SetDeadline(time.Now())
 		flow.stream.Close()
 		if flow.release != nil {
 			flow.release()

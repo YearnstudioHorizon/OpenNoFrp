@@ -204,7 +204,7 @@ func NewClientTLSConfig(expectedFingerprint string, onFirstSeenFingerprint func(
 				return onFirstSeenFingerprint(actualFP)
 			}
 
-			return nil
+			return errors.New("tlsutil: 既未配置证书指纹，也未提供首次信任(TOFU)回调，拒绝不安全连接")
 		},
 	}
 }

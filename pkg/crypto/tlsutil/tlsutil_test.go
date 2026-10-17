@@ -76,3 +76,18 @@ func TestLoadOrCreateCert(t *testing.T) {
 		t.Fatal("empty certificate after reload")
 	}
 }
+
+func TestClientTLSConfigVerify(t *testing.T) {
+	_, _, fp, err := GenerateSelfSignedCert([]string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPin := NewClientTLSConfig(fp, nil)
+	if cfgPin == nil || cfgPin.VerifyPeerCertificate == nil {
+		t.Fatal("missing VerifyPeerCertificate in cfgPin")
+	}
+	cfgUnconfigured := NewClientTLSConfig("", nil)
+	if cfgUnconfigured == nil || cfgUnconfigured.VerifyPeerCertificate == nil {
+		t.Fatal("missing VerifyPeerCertificate in cfgUnconfigured")
+	}
+}

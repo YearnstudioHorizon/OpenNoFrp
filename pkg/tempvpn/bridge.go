@@ -8,35 +8,23 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
+	"opennofrp/pkg/netrelay"
 	"opennofrp/pkg/protocol"
 )
 
-func Relay(ctx context.Context, a, b net.Conn) {
-	closeBoth := func() { a.SetDeadline(time.Now()); b.SetDeadline(time.Now()); a.Close(); b.Close() }
-	stop := context.AfterFunc(ctx, closeBoth)
-	defer stop()
-	done := make(chan struct{}, 2)
-	copyOne := func(dst, src net.Conn) {
-		if _, err := io.Copy(dst, src); err != nil {
-			closeBoth()
-			done <- struct{}{}
-			return
-		}
-		if c, ok := dst.(interface{ CloseWrite() error }); ok {
-			c.CloseWrite()
-		} else {
-			dst.Close()
-		}
-		done <- struct{}{}
-	}
-	go copyOne(a, b)
-	go copyOne(b, a)
-	<-done
-	<-done
-	a.Close()
-	b.Close()
+var udpBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 65507)
+		return &b
+	},
+}
+
+// Relay forwards traffic bidirectionally with half-close support and context cancellation.
+func Relay(ctx context.Context, a, b net.Conn) error {
+	return netrelay.RelayContext(ctx, a, b)
 }
 
 func ReadDatagram(r io.Reader, buf []byte) (int, error) {
@@ -105,19 +93,21 @@ func RelayDatagrams(ctx context.Context, udpConn, stream net.Conn) {
 	defer cancel()
 	closeBoth := func() {
 		cancel()
-		udpConn.SetDeadline(time.Now())
-		stream.SetDeadline(time.Now())
-		udpConn.Close()
-		stream.Close()
+		_ = udpConn.SetDeadline(time.Now())
+		_ = stream.SetDeadline(time.Now())
+		_ = udpConn.Close()
+		_ = stream.Close()
 	}
 	stop := context.AfterFunc(ctx, closeBoth)
 	defer stop()
 	done := make(chan struct{}, 2)
 	go func() {
 		defer func() { closeBoth(); done <- struct{}{} }()
-		buf := make([]byte, 65507)
+		bufPtr := udpBufferPool.Get().(*[]byte)
+		defer udpBufferPool.Put(bufPtr)
+		buf := *bufPtr
 		for {
-			udpConn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+			_ = udpConn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 			if ctx.Err() != nil {
 				return
 			}
@@ -132,9 +122,11 @@ func RelayDatagrams(ctx context.Context, udpConn, stream net.Conn) {
 	}()
 	go func() {
 		defer func() { closeBoth(); done <- struct{}{} }()
-		buf := make([]byte, 65507)
+		bufPtr := udpBufferPool.Get().(*[]byte)
+		defer udpBufferPool.Put(bufPtr)
+		buf := *bufPtr
 		for {
-			stream.SetReadDeadline(time.Now().Add(2 * time.Minute))
+			_ = stream.SetReadDeadline(time.Now().Add(2 * time.Minute))
 			if ctx.Err() != nil {
 				return
 			}

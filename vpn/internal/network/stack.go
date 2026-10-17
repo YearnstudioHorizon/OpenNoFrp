@@ -80,12 +80,14 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial, d
 		r.Complete(false)
 		local := gonet.NewTCPConn(&q, endpoint)
 		if diagnostic == nil {
-			tempvpn.Relay(ctx, local, remote)
+			_ = tempvpn.Relay(ctx, local, remote)
 			return
 		}
 		diagnostic("TCP 本机握手完成：%s", flow)
 		observed := &diagnosticConn{Conn: local, log: diagnostic, flow: flow}
-		tempvpn.Relay(ctx, observed, remote)
+		if err := tempvpn.Relay(ctx, observed, remote); err != nil && ctx.Err() == nil {
+			diagnostic("TCP 转发异常：%s：%v", flow, err)
+		}
 		diagnostic("TCP 转发结束：%s，发送到目标=%d 字节，返回本机=%d 字节", flow, observed.readBytes.Load(), observed.writeBytes.Load())
 	})
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tf.HandlePacket)
@@ -126,6 +128,7 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial, d
 	defer func() { cancel(); closeNetwork() }()
 	errors := make(chan error, 2)
 	go func() {
+		var txBuf []byte
 		for {
 			packet := ep.ReadContext(ctx)
 			if packet.IsNil() {
@@ -137,7 +140,11 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial, d
 			// Linux TUN with virtio headers requires writable headroom. The
 			// same offset is accepted by Wintun, which skips the headroom.
 			const offset = 16
-			data := make([]byte, offset+view.Size())
+			need := offset + view.Size()
+			if cap(txBuf) < need {
+				txBuf = make([]byte, need+1024)
+			}
+			data := txBuf[:need]
 			copy(data[offset:], view.AsSlice())
 			view.Release()
 			trace.packet("TUN TX", data[offset:])

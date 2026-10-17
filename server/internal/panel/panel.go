@@ -19,7 +19,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -43,6 +44,7 @@ type OnRulesChanged func()
 type loginAttempt struct {
 	failedCount int
 	lockedUntil time.Time
+	lastAttempt time.Time
 }
 
 type Panel struct {
@@ -265,21 +267,37 @@ func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.mu.Lock()
+	now := time.Now()
+	// 定期清理超过 15 分钟未活动的 IP 记录，防止内存泄漏和拒绝服务
+	if len(p.loginAttempts) > 1024 {
+		for ip, att := range p.loginAttempts {
+			if now.Sub(att.lastAttempt) > 15*time.Minute && now.After(att.lockedUntil) {
+				delete(p.loginAttempts, ip)
+			}
+		}
+	}
+
 	attempt, ok := p.loginAttempts[clientIP]
 	if !ok {
 		attempt = &loginAttempt{}
 		p.loginAttempts[clientIP] = attempt
 	}
-	now := time.Now()
+	attempt.lastAttempt = now
 	if now.Before(attempt.lockedUntil) {
 		p.mu.Unlock()
 		w.WriteHeader(http.StatusTooManyRequests)
 		p.renderLogin(w, r, "登录失败次数过多，账号已临时锁定，请 30 秒后再试")
 		return
 	}
+	// 若前次锁定时间已到，重置失败计数
+	if !attempt.lockedUntil.IsZero() && now.After(attempt.lockedUntil) {
+		attempt.failedCount = 0
+		attempt.lockedUntil = time.Time{}
+	}
 	p.mu.Unlock()
 	if err := p.verifyCaptcha(r); err != nil {
 		p.mu.Lock()
+		attempt.lastAttempt = time.Now()
 		attempt.failedCount++
 		if attempt.failedCount >= 5 {
 			attempt.lockedUntil = time.Now().Add(30 * time.Second)
@@ -294,6 +312,7 @@ func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil || !okAuth {
 		p.mu.Lock()
+		attempt.lastAttempt = time.Now()
 		attempt.failedCount++
 		// 连续失败 5 次，锁定 30 秒
 		if attempt.failedCount >= 5 {
@@ -1170,8 +1189,24 @@ func (p *Panel) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Panel) handleDownload(w http.ResponseWriter, r *http.Request) {
-	name := path.Base(r.PathValue("name")) // 防止路径穿越
-	http.ServeFile(w, r, p.ClientBinDir+"/"+name)
+	if p.ClientBinDir == "" {
+		http.NotFound(w, r)
+		return
+	}
+	rawName := r.PathValue("name")
+	name := filepath.Base(filepath.Clean(rawName))
+	if name == "." || name == "/" || name == "" || strings.Contains(rawName, "/") || strings.Contains(rawName, "\\") {
+		http.NotFound(w, r)
+		return
+	}
+	filePath := filepath.Join(p.ClientBinDir, name)
+	info, err := os.Stat(filePath)
+	if err != nil || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	http.ServeFile(w, r, filePath)
 }
 
 // ---- 辅助函数 -------------------------------------------------------------

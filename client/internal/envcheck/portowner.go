@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // PortOwnerKind 对本地端口上实际监听的对象进行分类，这决定了哪种 TPROXY 部署
@@ -97,7 +99,44 @@ func DetectUDPPortOwner(port uint16, localIP ...string) (PortOwnerInfo, error) {
 	return detectPortOwner(port, "udp", localIP...)
 }
 
+type portOwnerCacheEntry struct {
+	info      PortOwnerInfo
+	err       error
+	expiresAt time.Time
+}
+
+var (
+	portOwnerMu    sync.RWMutex
+	portOwnerCache = make(map[string]portOwnerCacheEntry)
+)
+
 func detectPortOwner(port uint16, transport string, localIP ...string) (PortOwnerInfo, error) {
+	cacheKey := fmt.Sprintf("%s:%d:%s", transport, port, strings.Join(localIP, ","))
+	now := time.Now()
+	portOwnerMu.RLock()
+	if entry, ok := portOwnerCache[cacheKey]; ok && now.Before(entry.expiresAt) {
+		portOwnerMu.RUnlock()
+		return entry.info, entry.err
+	}
+	portOwnerMu.RUnlock()
+
+	info, err := detectPortOwnerUncached(port, transport, localIP...)
+
+	portOwnerMu.Lock()
+	if len(portOwnerCache) > 512 {
+		for k, v := range portOwnerCache {
+			if now.After(v.expiresAt) {
+				delete(portOwnerCache, k)
+			}
+		}
+	}
+	portOwnerCache[cacheKey] = portOwnerCacheEntry{info: info, err: err, expiresAt: now.Add(2 * time.Second)}
+	portOwnerMu.Unlock()
+
+	return info, err
+}
+
+func detectPortOwnerUncached(port uint16, transport string, localIP ...string) (PortOwnerInfo, error) {
 	info, found, dockerErr := inspectPublishedPort(port, transport, localIP...)
 	if found {
 		return info, nil

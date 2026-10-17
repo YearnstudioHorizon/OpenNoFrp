@@ -14,6 +14,7 @@ import (
 	"net"
 	"opennofrp/pkg/netrelay"
 	"sync"
+	"time"
 
 	"opennofrp/client/internal/envcheck"
 	"opennofrp/client/internal/netnsworker"
@@ -322,8 +323,25 @@ func (r *Reconciler) serveUDP(ctx context.Context, rule protocol.Rule, meta prot
 	defer upstream.Close()
 
 	// 流是字节管道，而 UDP 是数据报：需对每个数据报进行分帧。
-	go copyUDPFrames(stream, upstream)
-	copyUDPFramesReverse(upstream, stream)
+	closeBoth := func() {
+		_ = stream.SetDeadline(time.Now())
+		_ = upstream.SetDeadline(time.Now())
+		_ = stream.Close()
+		_ = upstream.Close()
+	}
+	done := make(chan struct{}, 2)
+	go func() {
+		copyUDPFrames(stream, upstream)
+		closeBoth()
+		done <- struct{}{}
+	}()
+	go func() {
+		copyUDPFramesReverse(upstream, stream)
+		closeBoth()
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
 }
 
 // ensureHostTPROXYReady 应用伪造源地址拨号所需的宿主机级 sysctls、策略路由

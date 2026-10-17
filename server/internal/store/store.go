@@ -166,7 +166,22 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 	if err := s.migrateRulesDualStack(); err != nil {
 		return fmt.Errorf("store: migrate rules dual-stack: %w", err)
 	}
+	if err := s.ensureIndexes(); err != nil {
+		return fmt.Errorf("store: ensure indexes: %w", err)
+	}
 	return nil
+}
+
+func (s *Store) ensureIndexes() error {
+	const indexes = `
+CREATE INDEX IF NOT EXISTS idx_rules_client_id ON rules(client_id);
+CREATE INDEX IF NOT EXISTS idx_rules_remote_port ON rules(remote_port);
+CREATE INDEX IF NOT EXISTS idx_rules_enabled ON rules(enabled);
+CREATE INDEX IF NOT EXISTS idx_panel_sessions_expires_at ON panel_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_temporary_vpn_client_id ON temporary_vpn(client_id);
+`
+	_, err := s.db.Exec(indexes)
+	return err
 }
 
 // migrateRulesDualStack 重建在 HTTP 规则出现之前创建的数据库中的 rules 表

@@ -2,13 +2,22 @@
 package netrelay
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
 )
+
+var bufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 32*1024)
+		return &b
+	},
+}
 
 // CloseWrite sends EOF without discarding data still arriving in the reverse direction.
 func CloseWrite(c net.Conn) error {
@@ -36,7 +45,9 @@ func Relay(a, b net.Conn) error {
 	}
 	done := make(chan error, 2)
 	copyDirection := func(dst, src net.Conn) {
-		_, err := io.Copy(dst, src)
+		bufPtr := bufferPool.Get().(*[]byte)
+		defer bufferPool.Put(bufPtr)
+		_, err := io.CopyBuffer(dst, src, *bufPtr)
 		if err == nil {
 			err = CloseWrite(dst)
 		}
@@ -52,4 +63,16 @@ func Relay(a, b net.Conn) error {
 		return first
 	}
 	return second
+}
+
+// RelayContext forwards both directions with context cancellation support.
+func RelayContext(ctx context.Context, a, b net.Conn) error {
+	stop := context.AfterFunc(ctx, func() {
+		_ = a.SetDeadline(time.Now())
+		_ = b.SetDeadline(time.Now())
+		_ = a.Close()
+		_ = b.Close()
+	})
+	defer stop()
+	return Relay(a, b)
 }

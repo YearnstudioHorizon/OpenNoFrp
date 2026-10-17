@@ -45,9 +45,7 @@ func (s *server) handleVPNConnection(conn net.Conn, raw []byte, sourceIP string)
 		return
 	}
 	conn.SetDeadline(time.Time{})
-	config := yamux.DefaultConfig()
-	config.StreamOpenTimeout = 15 * time.Second
-	ym, err := yamux.Server(conn, config)
+	ym, err := yamux.Server(conn, protocol.VPNYamuxConfig())
 	if err != nil {
 		return
 	}

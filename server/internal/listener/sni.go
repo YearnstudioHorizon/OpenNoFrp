@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"opennofrp/pkg/netrelay"
 	"opennofrp/pkg/protocol"
 )
 
@@ -175,17 +176,7 @@ func (m *Manager) handleTLSPassConn(tl *tlsPassListener, conn net.Conn) {
 		conn.Close()
 		return
 	}
-	pipeConns(conn, stream)
-}
-
-// pipeConns 双向转发直到任意一方结束，然后关闭两端。
-func pipeConns(a, b net.Conn) {
-	defer a.Close()
-	defer b.Close()
-	done := make(chan struct{}, 2)
-	go func() { io.Copy(a, b); done <- struct{}{} }()
-	go func() { io.Copy(b, a); done <- struct{}{} }()
-	<-done
+	_ = netrelay.Relay(conn, stream)
 }
 
 // openTLSPassPort 打开（或更新路由）某个端口上的 TLS 透传监听器。

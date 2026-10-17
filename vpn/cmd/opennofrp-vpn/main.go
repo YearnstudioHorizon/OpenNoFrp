@@ -101,9 +101,7 @@ func run(ctx context.Context, path, hostOverride string, verbose bool) error {
 		return fmt.Errorf("服务端返回的 VPN 配置无效")
 	}
 	conn.SetDeadline(time.Time{})
-	ymConfig := yamux.DefaultConfig()
-	ymConfig.StreamOpenTimeout = 15 * time.Second
-	ym, err := yamux.Client(conn, ymConfig)
+	ym, err := yamux.Client(conn, protocol.VPNYamuxConfig())
 	if err != nil {
 		return err
 	}

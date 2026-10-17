@@ -2,6 +2,7 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -233,7 +234,8 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 	}
 	defer os.Remove(tmpFile.Name())
 
-	written, err := io.Copy(tmpFile, downResp.Body)
+	// 限制最大下载大小为 200MB，防止恶意流或响应耗尽磁盘空间
+	written, err := io.Copy(tmpFile, io.LimitReader(downResp.Body, 200<<20))
 	if err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("写入临时升级文件失败: %w", err)
@@ -248,6 +250,24 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 	}
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("关闭升级文件失败: %w", err)
+	}
+
+	// 完整性校验：验证二进制文件头魔数，防止将网络拦截返回的 HTML 页面误写入可执行文件
+	checkFile, err := os.Open(tmpFile.Name())
+	if err != nil {
+		return fmt.Errorf("校验升级文件失败: %w", err)
+	}
+	var magic [4]byte
+	n, _ := io.ReadFull(checkFile, magic[:])
+	checkFile.Close()
+	if runtime.GOOS == "windows" {
+		if n < 2 || !bytes.Equal(magic[:2], []byte("MZ")) {
+			return fmt.Errorf("下载的文件不是有效的 Windows 可执行程序（可能包含 HTML 错误页或被篡改）")
+		}
+	} else if runtime.GOOS == "linux" {
+		if n < 4 || !bytes.Equal(magic[:4], []byte("\x7fELF")) {
+			return fmt.Errorf("下载的文件不是有效的 Linux 可执行程序（可能包含 HTML 错误页或被篡改）")
+		}
 	}
 
 	// 赋予可执行权限
