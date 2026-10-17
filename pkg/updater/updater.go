@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -185,37 +186,6 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 	}
 
 	const mirrorPrefix = "https://mirror.yearnstudio.cn/"
-	fmt.Printf("[OpenNoFrp] 正在下载最新版本: %s ...\n", downloadURL)
-
-	// 首先尝试 GitHub 直连下载，失败或超时则回退到 YearnStudio 镜像加速
-	var downResp *http.Response
-	downReq, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	if err == nil {
-		downClient := &http.Client{Timeout: 15 * time.Second}
-		downResp, err = downClient.Do(downReq)
-	}
-
-	if err != nil || (downResp != nil && downResp.StatusCode != http.StatusOK) {
-		if downResp != nil {
-			downResp.Body.Close()
-		}
-		mirrorURL := mirrorPrefix + downloadURL
-		fmt.Printf("[OpenNoFrp] 直连 GitHub 下载失败或超时，正在自动切换至国内加速镜像: %s ...\n", mirrorURL)
-		mirrorReq, mErr := http.NewRequestWithContext(ctx, http.MethodGet, mirrorURL, nil)
-		if mErr != nil {
-			return fmt.Errorf("创建镜像请求失败: %w", mErr)
-		}
-		mirrorClient := &http.Client{Timeout: 60 * time.Second}
-		downResp, err = mirrorClient.Do(mirrorReq)
-		if err != nil {
-			return fmt.Errorf("通过加速镜像下载依然失败: %w", err)
-		}
-	}
-	defer downResp.Body.Close()
-
-	if downResp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载返回 HTTP %d", downResp.StatusCode)
-	}
 
 	// 定位当前正在运行的程序真实路径
 	execPath, err := os.Executable()
@@ -234,16 +204,12 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 	}
 	defer os.Remove(tmpFile.Name())
 
-	// 限制最大下载大小为 200MB，防止恶意流或响应耗尽磁盘空间
-	written, err := io.Copy(tmpFile, io.LimitReader(downResp.Body, 200<<20))
-	if err != nil {
+	fmt.Printf("[OpenNoFrp] 正在下载最新版本: %s ...\n", downloadURL)
+	if err := downloadAssetToFile(ctx, tmpFile, downloadURL, mirrorPrefix); err != nil {
 		_ = tmpFile.Close()
-		return fmt.Errorf("写入临时升级文件失败: %w", err)
+		return err
 	}
-	if written == 0 {
-		_ = tmpFile.Close()
-		return fmt.Errorf("下载的升级文件为空")
-	}
+
 	if err := tmpFile.Sync(); err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("同步升级文件失败: %w", err)
@@ -289,6 +255,56 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 		fmt.Printf("  sudo systemctl restart opennofrp-client\n")
 	}
 
+	return nil
+}
+
+var (
+	directDownloadTimeout = 20 * time.Second
+	mirrorDownloadTimeout = 180 * time.Second
+)
+
+func downloadAssetToFile(ctx context.Context, tmpFile *os.File, downloadURL, mirrorPrefix string) error {
+	downloadToFile := func(targetURL string, timeout time.Duration) error {
+		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if err := tmpFile.Truncate(0); err != nil {
+			return err
+		}
+		dCtx, dCancel := context.WithTimeout(ctx, timeout)
+		defer dCancel()
+		req, err := http.NewRequestWithContext(dCtx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("User-Agent", "OpenNoFrp-Updater/"+version.Version)
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		written, err := io.Copy(tmpFile, io.LimitReader(resp.Body, 200<<20))
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return errors.New("下载的文件为空")
+		}
+		return nil
+	}
+
+	downErr := downloadToFile(downloadURL, directDownloadTimeout)
+	if downErr != nil {
+		mirrorURL := mirrorPrefix + downloadURL
+		fmt.Printf("[OpenNoFrp] 直连 GitHub 下载失败或超时（%v），正在自动切换至国内加速镜像: %s ...\n", downErr, mirrorURL)
+		if mErr := downloadToFile(mirrorURL, mirrorDownloadTimeout); mErr != nil {
+			return fmt.Errorf("写入临时升级文件失败 (GitHub 直连: %v; 加速镜像: %w)", downErr, mErr)
+		}
+	}
 	return nil
 }
 

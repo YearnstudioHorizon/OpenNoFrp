@@ -29,7 +29,7 @@ func (c *Client) startUpdate(ctx context.Context, conn net.Conn, requestID strin
 	}
 	go func() {
 		defer c.updating.Store(false)
-		updateCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		updateCtx, cancel := context.WithTimeout(ctx, 150*time.Second)
 		defer cancel()
 		result, err := c.Update(updateCtx)
 		message := protocol.ClientUpdateResult{Type: protocol.MsgClientUpdateResult, RequestID: requestID, Status: "up_to_date", Version: result.Version}
