@@ -139,23 +139,18 @@ func runEndToEndVPNYamuxChain(t *testing.T) {
 				// Read metadata (like ServeLoopback does)
 				meta, err := protocol.ReadStreamMetadata(stream)
 				if err != nil {
-					t.Logf("client read meta error: %v", err)
 					return
 				}
-				t.Logf("client received meta: %+v", meta)
 				if !meta.HasFlag(protocol.FlagTemporaryVPN) {
 					return
 				}
 				targetConn, err := net.Dial("tcp", backend.Addr().String())
 				if err != nil {
-					t.Logf("client dial backend error: %v", err)
 					stream.Write([]byte{protocol.DialAckFailed})
 					return
 				}
 				defer targetConn.Close()
-				t.Logf("client writing DialAckOK")
 				if _, err := stream.Write([]byte{protocol.DialAckOK}); err != nil {
-					t.Logf("client write DialAckOK err: %v", err)
 					return
 				}
 				tempvpn.Relay(ctx, stream, targetConn)
@@ -191,13 +186,10 @@ func runEndToEndVPNYamuxChain(t *testing.T) {
 				defer stream.Close()
 				var req protocol.VPNDialRequest
 				if err := protocol.ReadJSONMessage(stream, &req); err != nil {
-					t.Logf("server read json error: %v", err)
 					return
 				}
-				t.Logf("server accepted req: %+v", req)
 				cStream, err := srvSess.Open()
 				if err != nil {
-					t.Logf("srvSess.Open error: %v", err)
 					stream.Write([]byte{protocol.DialAckFailed})
 					return
 				}
@@ -209,13 +201,11 @@ func runEndToEndVPNYamuxChain(t *testing.T) {
 					VPNPort:    req.Port,
 				}
 				if err := meta.WriteHeader(cStream); err != nil {
-					t.Logf("meta.WriteHeader error: %v", err)
 					stream.Write([]byte{protocol.DialAckFailed})
 					return
 				}
 				var ack [1]byte
-				if n, err := io.ReadFull(cStream, ack[:]); err != nil || ack[0] != protocol.DialAckOK {
-					t.Logf("server read ack from client: n=%d err=%v, ack=%v", n, err, ack)
+				if n, err := io.ReadFull(cStream, ack[:]); err != nil || ack[0] != protocol.DialAckOK || n != 1 {
 					stream.Write([]byte{protocol.DialAckFailed})
 					return
 				}
@@ -246,17 +236,14 @@ func runEndToEndVPNYamuxChain(t *testing.T) {
 	dial := func(ctx context.Context, kind string, port uint16) (net.Conn, error) {
 		stream, err := vpnCliSess.Open()
 		if err != nil {
-			t.Logf("dial open error: %v", err)
 			return nil, err
 		}
 		if err := protocol.WriteJSONMessage(stream, protocol.VPNDialRequest{Network: kind, Port: port}); err != nil {
-			t.Logf("dial write json error: %v", err)
 			stream.Close()
 			return nil, err
 		}
 		var ack [1]byte
 		if _, err := io.ReadFull(stream, ack[:]); err != nil || ack[0] != protocol.DialAckOK {
-			t.Logf("dial ack error: %v, ack: %v", err, ack)
 			stream.Close()
 			return nil, fmt.Errorf("dial failed")
 		}
@@ -703,7 +690,7 @@ func runBrowserMultiAssetFlow(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, device, netip.MustParseAddr("10.203.0.1"), dial, t.Logf)
+		done <- Run(ctx, device, netip.MustParseAddr("10.203.0.1"), dial)
 	}()
 
 	// Simulate Browser opening connection 1 (GET /)
@@ -720,7 +707,9 @@ func runBrowserMultiAssetFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("conn1 read failed: %v", err)
 	}
-	t.Logf("conn1 read %d bytes (keep conn1 OPEN like browser does)", n1)
+	if n1 == 0 {
+		t.Fatalf("conn1 read 0 bytes")
+	}
 
 	// Simulate Browser opening connection 2 (speculative or asset, sending 1819 bytes with large Cookie)
 	conn2, err := gonet.DialContextTCP(ctx, client, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 203, 0, 1}), Port: uint16(bPort)}, ipv4.ProtocolNumber)
@@ -729,7 +718,6 @@ func runBrowserMultiAssetFlow(t *testing.T) {
 	}
 	largeCookie := strings.Repeat("A", 1500)
 	req2 := fmt.Sprintf("GET /asset HTTP/1.1\r\nHost: local:3001\r\nCookie: %s\r\n\r\n", largeCookie)
-	t.Logf("conn2 sending %d bytes", len(req2))
 	if _, err := conn2.Write([]byte(req2)); err != nil {
 		t.Fatalf("conn2 write failed: %v", err)
 	}
@@ -738,7 +726,6 @@ func runBrowserMultiAssetFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("conn2 read failed: %v", err)
 	}
-	t.Logf("conn2 read %d bytes", n2)
 	if n2 == 0 {
 		t.Fatalf("conn2 returned 0 bytes!")
 	}
