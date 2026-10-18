@@ -1,3 +1,5 @@
+//go:build linux
+
 // Command netnsworker-poc 是一个独立的概念验证（PoC）二进制程序，用于
 // 验证 netnsworker 包的核心论断：Go 程序可以通过 setns(2) 进入目标 Docker
 // 容器的网络命名空间，在该命名空间内部（以该命名空间自身的 127.0.0.1 为目标）

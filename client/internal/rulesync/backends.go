@@ -1,3 +1,5 @@
+//go:build linux
+
 package rulesync
 
 // 多后端负载均衡与故障转移（Client 侧）：一条规则除 LocalIP:LocalPort 外还可携带

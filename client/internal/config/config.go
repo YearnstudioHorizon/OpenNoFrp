@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package config 负责加载并校验 OpenNoFrp Client 的配置。
 //
 // 文件格式为 TOML。经过产品化重构后，Client 不再自行定义 [[proxy]] 规则：

@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package netnsworker 让 OpenNoFrp Client 在目标容器的网络命名空间内部（而非
 // Client 自身所在的宿主机网络命名空间）运行基于 TPROXY 的源 IP 保留转发逻辑。
 //

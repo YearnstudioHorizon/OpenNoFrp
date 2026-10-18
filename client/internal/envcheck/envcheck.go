@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package envcheck 探测本地 Linux 环境是否满足基于 TPROXY 的源 IP 保留功能
 // 所需的全部条件，并给出清晰、可操作的结果，而不是让该功能在运行时莫名其妙地
 // 失败。

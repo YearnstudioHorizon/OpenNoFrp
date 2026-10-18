@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package controlconn 管理 Client 到 Server 的连接：首次启动注册（一次性
 // token -> 永久凭据）、此后每次连接的握手（client_id/client_secret）、周期性
 // 心跳、带指数退避的自动重连、接收规则快照，以及接受 Server 为每个被转发

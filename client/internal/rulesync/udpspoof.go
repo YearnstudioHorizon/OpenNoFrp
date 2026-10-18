@@ -1,3 +1,5 @@
+//go:build linux
+
 package rulesync
 
 // UDP 源 IP 保留：按本地端口归属者选择在宿主机 netns 或容器 netns 内以访问者的

@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package forwarder 实现运行在 Client 上的数据面逻辑：对每条启用了
 // preserve_source_ip 的代理规则，它监听经 TPROXY 重定向而来的连接，并为每个
 // 连接以伪造的源 IP（与原始远端客户端一致）拨号到真实的本地服务。

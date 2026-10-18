@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package rulesync 是 Client 端针对 Server 推送的转发规则的本地协调器。
 // 每次握手之后以及面板侧每次修改规则之后，Client 都会从 Server 收到一条
 // 完整的 RulesSnapshot 消息，并根据每个流的元数据中携带的规则 ID，把传入的

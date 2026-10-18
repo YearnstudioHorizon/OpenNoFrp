@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package tproxy 实现本地透明代理机制，使 OpenNoFrp Client 能够把连接交付给
 // 完全未经修改的本地服务，同时让该服务通过普通的 accept()/recvfrom() 调用
 // 看到真实的原始客户端 IP。

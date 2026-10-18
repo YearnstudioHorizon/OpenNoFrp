@@ -1,3 +1,5 @@
+//go:build linux
+
 package rulesync
 
 // Proxy Protocol（HAProxy PROXY 协议 v1/v2）：规则开启后，Client 在拨通本地后端之后、

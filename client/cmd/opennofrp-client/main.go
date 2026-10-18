@@ -1,3 +1,5 @@
+//go:build linux
+
 // Command opennofrp-client 是 OpenNoFrp 本地 Client 的入口程序。经过产品化
 // 重构后，其配置被刻意精简为：如何连接 Server，以及首次启动时使用的一次性
 // token。所有转发规则均由 Server（通过面板管理）经控制连接下发；本进程只需

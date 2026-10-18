@@ -1,3 +1,5 @@
+//go:build linux
+
 package tproxy
 
 // UDP 源地址伪装拨号：与 TCP 的 DialSpoofed 相同，借助 IP_TRANSPARENT 把 UDP 套接字
