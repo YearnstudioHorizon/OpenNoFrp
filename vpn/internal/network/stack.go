@@ -181,5 +181,9 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial, d
 			}
 		}
 	}()
-	return <-errors
+	err := <-errors
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }

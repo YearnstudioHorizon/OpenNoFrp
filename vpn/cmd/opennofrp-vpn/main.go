@@ -85,7 +85,10 @@ func run(ctx context.Context, path, hostOverride string, verbose bool) error {
 	conn := tls.Client(raw, tlsutil.NewClientTLSConfig(config.Fingerprint, nil))
 	conn.SetDeadline(time.Now().Add(15 * time.Second))
 	if err := conn.HandshakeContext(deadlineCtx); err != nil {
-		return err
+		if errors.Is(err, io.EOF) {
+			return fmt.Errorf("服务端在 TLS 握手阶段主动断开连接（可能因多次凭据错误触发防爆破临时封禁 5 分钟，或服务端端口异常）")
+		}
+		return fmt.Errorf("TLS 握手失败：%w", err)
 	}
 	if err := protocol.WriteJSONMessage(conn, protocol.VPNHandshake{Type: protocol.MsgVPNHandshake, ProtocolVersion: protocol.ProtocolVersion, Token: config.Token}); err != nil {
 		return err
@@ -177,7 +180,7 @@ func run(ctx context.Context, path, hostOverride string, verbose bool) error {
 	if deadlineCtx.Err() != nil {
 		return deadlineCtx.Err()
 	}
-	if ym.IsClosed() {
+	if ym.IsClosed() || runCtx.Err() != nil {
 		return fmt.Errorf("服务端连接关闭，临时凭据可能已到期、被撤销或目标机器已离线")
 	}
 	return err
