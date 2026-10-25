@@ -267,6 +267,46 @@ func findListeningInode(path string, port uint16, transport string) (string, err
 	return "", scanner.Err()
 }
 
+// UDPListensOnWildcard reports whether a UDP socket on port is bound to 0.0.0.0 or [::].
+func UDPListensOnWildcard(port uint16) (bool, error) {
+	for _, path := range []string{"/proc/net/udp", "/proc/net/udp6"} {
+		ok, err := hasWildcardUDPSocket(path, port)
+		if err != nil || ok {
+			return ok, err
+		}
+	}
+	return false, nil
+}
+
+func hasWildcardUDPSocket(path string, port uint16) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("envcheck: open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	wantHex := fmt.Sprintf("%04X", port)
+	scanner := bufio.NewScanner(f)
+	scanner.Scan() // 跳过表头行
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 10 {
+			continue
+		}
+		parts := strings.Split(fields[1], ":")
+		if len(parts) != 2 {
+			continue
+		}
+		if strings.ToUpper(parts[1]) == wantHex && fields[3] == "07" && strings.Trim(parts[0], "0") == "" {
+			return true, nil
+		}
+	}
+	return false, scanner.Err()
+}
+
 func processName(pid int) string {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
 	if err != nil {

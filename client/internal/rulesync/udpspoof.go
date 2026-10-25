@@ -69,5 +69,27 @@ func (r *Reconciler) dialSpoofedUDP(ctx context.Context, rule protocol.Rule, met
 	if err := r.ensureHostTPROXYReady(); err != nil {
 		return nil, fmt.Errorf("host TPROXY setup: %w", err)
 	}
+	// A wildcard-bound service replies from the route-selected source address,
+	// not from loopback; dial that address so the reply matches conntrack.
+	if targetIP.IsLoopback() {
+		if wildcard, err := envcheck.UDPListensOnWildcard(rule.LocalPort); err == nil && wildcard {
+			if src, err := replySourceIP(meta.ClientAddr, meta.ClientPort); err == nil {
+				targetIP = src
+			}
+		}
+	}
 	return dialer.DialSpoofedUDP(ctx, meta.ClientAddr, meta.ClientPort, targetIP, rule.LocalPort)
+}
+
+// replySourceIP returns the source address the kernel selects for packets to dst.
+func replySourceIP(dst net.IP, port uint16) (net.IP, error) {
+	if port == 0 {
+		port = 9
+	}
+	c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: dst, Port: int(port)})
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	return c.LocalAddr().(*net.UDPAddr).IP, nil
 }
