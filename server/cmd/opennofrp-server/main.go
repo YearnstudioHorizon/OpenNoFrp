@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -192,6 +193,14 @@ func runServer() {
 	p.UpdateClient = s.updateClient
 	p.RuleStats = s.listener.Stats
 	p.MetricsToken = cfg.Server.MetricsToken
+	p.MigrationPaths = &panel.MigrationPaths{
+		ConfigFile: configPath,
+		DBPath:     cfg.Server.DBPath,
+		TLSCert:    cfg.Server.TLSCertPath,
+		TLSKey:     cfg.Server.TLSKeyPath,
+		ACMEDir:    cfg.Server.ACMECacheDir,
+		DataDir:    filepath.Dir(cfg.Server.DBPath),
+	}
 	panelAddr := fmt.Sprintf("%s:%d", cfg.Server.PanelAddr, cfg.Server.PanelPort)
 	httpSrv := &http.Server{Addr: panelAddr, Handler: p.Handler()}
 	go func() {

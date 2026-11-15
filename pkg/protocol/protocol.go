@@ -23,6 +23,9 @@ import (
 // 握手期间交换该值，若不匹配则拒绝继续。
 const ProtocolVersion uint8 = 1
 
+// ErrNotSupported 表示当前 Client 平台不支持所请求的操作。
+var ErrNotSupported = errors.New("protocol: operation not supported on this platform")
+
 // TransportKind 标识被转发的流是 TCP 还是 UDP。
 type TransportKind uint8
 

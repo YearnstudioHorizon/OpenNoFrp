@@ -24,6 +24,14 @@ jobs:
           - goos: linux
             goarch: arm64
             build_client: true
+          # macOS AMD64 (Intel)
+          - goos: darwin
+            goarch: amd64
+            build_client: true
+          # macOS ARM64 (Apple Silicon)
+          - goos: darwin
+            goarch: arm64
+            build_client: true
           # Windows AMD64（仅构建服务端）
           - goos: windows
             goarch: amd64
@@ -89,7 +97,7 @@ jobs:
           go build -ldflags="${LDFLAGS}" -o "dist/${VPN_BIN}" ./vpn/cmd/opennofrp-vpn
           cp vpn/internal/network/assets/WINTUN-LICENSE.txt dist/WINTUN-LICENSE.txt
 
-          # 2. 编译 Client (Linux 专享，依赖 Linux 原生 TPROXY/Netns 接口)
+          # 2. 编译 Client (Linux 使用 TPROXY/Netns 源 IP 保留；macOS 为普通转发版)
           if [ "${{ matrix.build_client }}" = "true" ]; then
             CLIENT_BIN="opennofrp-client-${{ matrix.goos }}-${{ matrix.goarch }}"
             echo "Building ${CLIENT_BIN}..."

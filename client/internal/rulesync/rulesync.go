@@ -1,11 +1,14 @@
-//go:build linux
+//go:build linux || darwin
 
 // Package rulesync 是 Client 端针对 Server 推送的转发规则的本地协调器。
 // 每次握手之后以及面板侧每次修改规则之后，Client 都会从 Server 收到一条
 // 完整的 RulesSnapshot 消息，并根据每个流的元数据中携带的规则 ID，把传入的
-// 连接流分发到正确的本地端点——转发策略（plain / 宿主机 netns 中的
-// TPROXY 式伪造源地址拨号 / 容器 netns 中的伪造源地址拨号）由对本地目标端口
-// 重新执行的 DetectPortOwner 探测结果决定。
+// 连接流分发到正确的本地端点。
+//
+// 平台差异通过两个钩子隔离（见 spoofer_linux.go / spoofer_darwin.go）：
+// Linux 依据对本地目标端口归属者的探测结果，在宿主机或容器 netns 中使用
+// TPROXY 式伪造源地址拨号以保留真实源 IP；macOS 暂不支持源 IP 保留，
+// 开启该选项的规则会自动降级为普通转发。
 package rulesync
 
 import (
@@ -14,20 +17,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"opennofrp/pkg/netrelay"
 	"sync"
 	"time"
 
-	"opennofrp/client/internal/envcheck"
-	"opennofrp/client/internal/netnsworker"
-	"opennofrp/client/internal/tproxy"
+	"opennofrp/pkg/netrelay"
 	"opennofrp/pkg/protocol"
 )
-
-// sharedFWMark 是所有伪造源地址连接所使用的 fwmark。它必须与安装宿主机/容器
-// 策略路由以及 OUTPUT CONNMARK save/restore 规则对时所用的值一致
-// （即取值相同的 tproxy.DefaultFWMark）。
-const sharedFWMark = tproxy.DefaultFWMark
 
 // Reconciler 保存最新的规则快照以及每条规则的运行时状态。
 type Reconciler struct {
@@ -36,7 +31,7 @@ type Reconciler struct {
 
 	mu            sync.RWMutex
 	rules         map[uint32]protocol.Rule
-	preparedNetns map[int]bool // 容器 PID -> 其 netns 是否已配置 sysctls+路由
+	preparedNetns map[int]bool // 容器 PID -> 其 netns 是否已配置 sysctls+路由（仅 Linux 使用）
 	hostSetupDone bool
 }
 
@@ -57,6 +52,9 @@ func (r *Reconciler) Apply(rules []protocol.Rule) {
 	r.rules = make(map[uint32]protocol.Rule, len(rules))
 	for _, rule := range rules {
 		r.rules[uint32(rule.ID)] = rule
+		if rule.PreserveSourceIP && !sourceIPSupported() {
+			r.Logger.Warn("rule requests source IP preservation, unsupported on this platform; plain forwarding will be used", "rule", rule.Name)
+		}
 	}
 	r.Logger.Info("rules snapshot applied", "count", len(rules))
 }
@@ -150,119 +148,38 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 	target := net.JoinHostPort(rule.LocalIP, fmt.Sprint(rule.LocalPort))
 
 	if !rule.PreserveSourceIP {
-		upstream, err := dialPlain(ctx, target)
-		if err != nil {
-			r.Logger.Warn("plain dial failed, dropping", "rule", rule.Name, "target", target, "error", err)
-			return
-		}
-		defer upstream.Close()
-		r.relayUpstream(rule, meta, stream, upstream)
+		r.relayPlain(ctx, rule, meta, stream, target)
 		return
 	}
 
-	// 已要求保留源 IP：根据对本地目标端口归属者的实时探测来选择策略。
-	// 每个连接都重新执行 DetectPortOwner 很重要，因为 Docker 容器重启后
-	// 其 PID 会改变（/proc/<pid>/ns/net 也随之不同），否则过期的 PID
-	// 会悄无声息地进入已失效的命名空间。
-	owner, err := envcheck.DetectPortOwner(rule.LocalPort, rule.LocalIP)
+	// 已要求保留源 IP：交给平台相关的伪造源地址拨号实现。返回 (nil, nil)
+	// 表示该路径不可用、回退普通转发；返回错误表示应丢弃该连接。
+	upstream, err := r.dialPreservingSource(ctx, rule, meta, target)
 	if err != nil {
-		r.Logger.Warn("cannot determine port owner, falling back to plain forwarding",
-			"rule", rule.Name, "port", rule.LocalPort, "error", err)
-		upstream, err := dialPlain(ctx, target)
-		if err != nil {
-			return
-		}
-		defer upstream.Close()
-		r.relayUpstream(rule, meta, stream, upstream)
+		r.Logger.Warn("spoofed dial failed, dropping connection", "rule", rule.Name, "error", err)
 		return
 	}
-
-	switch owner.Kind {
-	case envcheck.OwnerHostProcess, envcheck.OwnerDockerHostNetwork:
-		if err := r.ensureHostTPROXYReady(); err != nil {
-			r.Logger.Warn("host TPROXY environment setup failed, falling back to plain forwarding", "error", err)
-			upstream, err := dialPlain(ctx, target)
-			if err != nil {
-				return
-			}
-			defer upstream.Close()
-			r.relayUpstream(rule, meta, stream, upstream)
-			return
-		}
-		dialer := tproxy.SpoofedDialer{FWMark: sharedFWMark}
-		upstream, err := dialer.DialSpoofed(ctx, meta.ClientAddr, net.ParseIP(rule.LocalIP), rule.LocalPort)
-		if err != nil {
-			r.Logger.Warn("spoofed dial failed, dropping connection", "rule", rule.Name, "error", err)
-			return
-		}
-		defer upstream.Close()
-		r.relayUpstream(rule, meta, stream, upstream)
-
-	case envcheck.OwnerDockerBridgeNetwork:
-		cns := netnsworker.ContainerNetns{PID: owner.PID}
-		if err := r.ensureNetnsReady(cns); err != nil {
-			r.Logger.Warn("container netns setup failed, falling back to plain forwarding",
-				"rule", rule.Name, "container_pid", owner.PID, "error", err)
-			upstream, err := dialPlain(ctx, target)
-			if err != nil {
-				return
-			}
-			defer upstream.Close()
-			r.relayUpstream(rule, meta, stream, upstream)
-			return
-		}
-
-		// bridge 网络容器：整个伪造源地址的连接必须在该容器的网络命名空间
-		// 【内部】创建——宿主机上的任何 iptables/TPROXY 都无法在 Docker 的
-		// bridge MASQUERADE 之后保留下来，参见 docs/01-architecture.md 第 6.5 节。
-		// 该 goroutine 必须在调用 socket() 之前以 runtime.LockOSThread 的方式
-		// Enter() 此 netns。
-		containerIP := net.ParseIP("127.0.0.1")
-		if owner.TargetIP != "" {
-			containerIP = net.ParseIP(owner.TargetIP)
-		}
-		containerPort := rule.LocalPort
-		if owner.TargetPort != 0 {
-			containerPort = owner.TargetPort
-		}
-		upstreamCh := make(chan net.Conn, 1)
-		errCh := make(chan error, 1)
-		go func() {
-			if err := cns.Enter(); err != nil {
-				errCh <- fmt.Errorf("enter container netns: %w", err)
-				return
-			}
-			dialer := tproxy.SpoofedDialer{FWMark: sharedFWMark}
-			upstream, err := dialer.DialSpoofed(ctx, meta.ClientAddr, containerIP, containerPort)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			upstreamCh <- upstream
-		}()
-		select {
-		case err := <-errCh:
-			r.Logger.Warn("container-netns spoofed dial failed, dropping", "rule", rule.Name, "error", err)
-			return
-		case upstream := <-upstreamCh:
-			defer upstream.Close()
-			r.relayUpstream(rule, meta, stream, upstream)
-		}
-
-	default:
-		r.Logger.Warn("unknown port owner kind, falling back to plain forwarding", "rule", rule.Name, "kind", owner.Kind.String())
-		upstream, err := dialPlain(ctx, target)
-		if err != nil {
-			return
-		}
-		defer upstream.Close()
-		r.relayUpstream(rule, meta, stream, upstream)
+	if upstream == nil {
+		r.relayPlain(ctx, rule, meta, stream, target)
+		return
 	}
+	defer upstream.Close()
+	r.relayUpstream(rule, meta, stream, upstream)
 }
 
-// serveUDP 转发一个 UDP 流。开启 preserve_source_ip 时，按本地端口归属者选择
-// 伪造源地址拨号（宿主机 netns 或容器 netns 内，与 TCP 相同的策略路由 +
-// CONNMARK 回包规则）；任何一步失败都回退为普通转发，保证流可用。
+// relayPlain 以普通转发方式拨号并中继一条流（源 IP 保留不可用时的统一回退路径）。
+func (r *Reconciler) relayPlain(ctx context.Context, rule protocol.Rule, meta protocol.StreamMetadata, stream net.Conn, target string) {
+	upstream, err := dialPlain(ctx, target)
+	if err != nil {
+		r.Logger.Warn("plain dial failed, dropping", "rule", rule.Name, "target", target, "error", err)
+		return
+	}
+	defer upstream.Close()
+	r.relayUpstream(rule, meta, stream, upstream)
+}
+
+// serveUDP 转发一个 UDP 流。开启 preserve_source_ip 时先尝试伪造源地址拨号
+// （平台相关），失败时回退为普通转发，保证流可用。
 func (r *Reconciler) serveUDP(ctx context.Context, rule protocol.Rule, meta protocol.StreamMetadata, stream net.Conn) {
 	target := net.JoinHostPort(rule.LocalIP, fmt.Sprint(rule.LocalPort))
 	var upstream net.Conn
@@ -304,68 +221,6 @@ func (r *Reconciler) serveUDP(ctx context.Context, rule protocol.Rule, meta prot
 	}()
 	<-done
 	<-done
-}
-
-// ensureHostTPROXYReady 应用伪造源地址拨号所需的宿主机级 sysctls、策略路由
-// 以及 OUTPUT CONNMARK save/restore 规则对，每个进程只执行一次。这里不需要
-// 入站 TPROXY mangle 规则：yamux 流已携带原始客户端地址，因此 Client 直接使用
-// SO_MARK/IP_TRANSPARENT 拨号——但回包方向仍需要 CONNMARK 恢复，否则服务的
-// SYN-ACK 会经默认网关路由出去，导致握手超时（参见 tproxy.EnsureConnmarkReplyRules）。
-func (r *Reconciler) ensureHostTPROXYReady() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.hostSetupDone {
-		return nil
-	}
-	iface, err := tproxy.DefaultIngressInterface()
-	if err != nil {
-		return fmt.Errorf("detect ingress interface: %w", err)
-	}
-	if err := (tproxy.Manager{StateDir: r.StateDir}).SetupRuntime(iface, tproxy.DefaultRouteTable, sharedFWMark); err != nil {
-		return err
-	}
-	r.hostSetupDone = true
-	r.Logger.Info("host TPROXY environment prepared (sysctls + policy route + CONNMARK)", "iface", iface)
-	return nil
-}
-
-// ensureNetnsReady 在容器的 netns 内应用 sysctls + 策略路由，每个容器 PID
-// 只执行一次。通过 RunInNamespace 执行，确保写入落在容器自身的 eth0/lo/all 条目上。
-func (r *Reconciler) ensureNetnsReady(cns netnsworker.ContainerNetns) error {
-	r.mu.Lock()
-	if r.preparedNetns[cns.PID] {
-		r.mu.Unlock()
-		return nil
-	}
-	r.mu.Unlock()
-
-	err := cns.RunInNamespace(func() error {
-		iface, err := netnsworker.IngressInterface()
-		if err != nil {
-			return err
-		}
-		if err := tproxy.ApplySysctls(iface); err != nil {
-			return err
-		}
-		if err := tproxy.EnsurePolicyRoute(tproxy.DefaultRouteTable, sharedFWMark); err != nil {
-			return err
-		}
-		// 回包路径的要求与宿主机路径相同，但安装在容器的 netns 内
-		// （我们已通过 setns() 进入，因此 iptables-legacy 操作的是容器自己的表）。
-		if err := tproxy.EnsureConnmarkReplyRules(sharedFWMark); err != nil {
-			return fmt.Errorf("ensure CONNMARK reply rules: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	r.mu.Lock()
-	r.preparedNetns[cns.PID] = true
-	r.mu.Unlock()
-	r.Logger.Info("container netns TPROXY environment prepared", "container_pid", cns.PID)
-	return nil
 }
 
 func dialPlain(ctx context.Context, addr string) (net.Conn, error) {

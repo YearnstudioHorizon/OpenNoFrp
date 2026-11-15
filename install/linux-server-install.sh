@@ -295,11 +295,9 @@ chmod 0755 "$STAGE_SERVER"
 # 预拉取客户端二进制文件 (先放在临时目录，替换成功后再落盘)
 log "正在预拉取客户端二进制文件 (用于服务器托管分发)..."
 download_from_gh "opennofrp-client-linux-$ARCH" "$STAGE_CLIENT_DIR/opennofrp-client-linux-$ARCH" || warn "客户端 linux/$ARCH 预拉取失败，将保留现有托管文件"
-if [ "$ARCH" = "amd64" ]; then
-  download_from_gh "opennofrp-client-linux-arm64" "$STAGE_CLIENT_DIR/opennofrp-client-linux-arm64" 2>/dev/null || true
-else
-  download_from_gh "opennofrp-client-linux-amd64" "$STAGE_CLIENT_DIR/opennofrp-client-linux-amd64" 2>/dev/null || true
-fi
+download_from_gh "opennofrp-client-linux-arm64" "$STAGE_CLIENT_DIR/opennofrp-client-linux-arm64" 2>/dev/null || true
+download_from_gh "opennofrp-client-darwin-amd64" "$STAGE_CLIENT_DIR/opennofrp-client-darwin-amd64" 2>/dev/null || true
+download_from_gh "opennofrp-client-darwin-arm64" "$STAGE_CLIENT_DIR/opennofrp-client-darwin-arm64" 2>/dev/null || true
 
 # ----------------------------------------------------------------------
 # 2. 创建专用低权限服务账户与持久化目录 (不影响运行中的服务)

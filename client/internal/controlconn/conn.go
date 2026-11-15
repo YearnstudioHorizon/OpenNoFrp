@@ -1,4 +1,4 @@
-//go:build linux
+//go:build !windows
 
 // Package controlconn 管理 Client 到 Server 的连接：首次启动注册（一次性
 // token -> 永久凭据）、此后每次连接的握手（client_id/client_secret）、周期性
@@ -34,13 +34,13 @@ import (
 type StreamHandler func(ctx context.Context, meta protocol.StreamMetadata, stream net.Conn)
 
 // ClientCapabilities 是本版本 Client 在握手时上报给 Server 的可选能力列表。
-// 每实现一项新能力（SNI 提示、Proxy Protocol、UDP 伪装、端口段等）就在此追加
-// 对应的 protocol.Cap* 常量。
+// 每实现一项新能力（SNI 提示、Proxy Protocol、端口段等）就在此追加对应的
+// protocol.Cap* 常量。注意：源 IP 保留（udp_spoof）依赖 Linux 的
+// TPROXY/CONNMARK，在非 Linux 平台上不可用（见 capabilities_platform.go）。
 var ClientCapabilities = []string{
 	protocol.CapDialAck,
 	protocol.CapSNIHint,
 	protocol.CapProxyProtocol,
-	protocol.CapUDPSpoof,
 	protocol.CapPortRange,
 }
 

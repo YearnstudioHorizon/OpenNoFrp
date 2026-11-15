@@ -1,4 +1,4 @@
-//go:build linux
+//go:build !windows
 
 // Package config 负责加载并校验 OpenNoFrp Client 的配置。
 //

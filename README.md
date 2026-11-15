@@ -26,7 +26,26 @@ curl -fsSL https://mirror.yearnstudio.cn/https://raw.githubusercontent.com/Yearn
 ```bash
 curl -fsSL "http://<服务器IP>:8080/install_client.sh?token=<TOKEN>&fingerprint=<FINGERPRINT>" | sudo bash
 ```
-内网客户端无需任何手动配置，命令执行完毕即刻完成 TLS 安全通道握手并连接就绪。
+内网客户端无需任何手动配置，命令执行完毕即刻完成 TLS 安全通道握手并连接就绪。支持 **Linux**（完整功能）与 **macOS**（普通转发版）。
+
+> [!NOTE]
+> **macOS 客户端**：`opennofrp-client-darwin-amd64/arm64` 通过 launchd 托管运行。
+> macOS 版暂不支持“保留访问者源 IP”（依赖 Linux TPROXY），开启该选项的规则会自动降级为普通转发；除此之外的 TCP/UDP/HTTP/TLS 转发、端口段、Proxy Protocol 等功能与 Linux 版一致。
+
+## 服务端一键迁移（点对点）
+
+需要更换云服务器时，在管理面板 **「账号设置」→「迁移到新服务器」** 点击生成迁移命令，
+然后粘贴到**新的 Linux 机器**上执行即可：
+
+```bash
+curl -fsSL "http://<旧服务器IP>:8080/migrate.sh?token=<MIGRATION_TOKEN>" | sudo bash
+```
+
+- **点对点直连**：新机器直接从旧服务器拉取配置、SQLite 数据库（规则/客户端凭据）、
+  TLS 证书与 ACME 缓存打包，全程不经过任何第三方。
+- **一次性令牌**：迁移令牌 30 分钟有效、数据仅允许下载一次，杜绝重放。
+- **平滑接管**：管理员密码、所有规则、客户端凭据与证书指纹原样保留；
+  迁移完成后确认新机正常，再停用旧服务器即可，客户端会自动重连。
 
 ## 临时 VPN 接入
 
@@ -100,6 +119,8 @@ OpenNoFrp/
 - ✅ 端到端 TLS 通道加密与 SHA-256 证书指纹绑定 (Certificate Pinning)
 - ✅ 共享协议包、Client/Server 核心代码、TPROXY helper
 - ✅ netns-worker 宿主/bridge 容器自动感知
+- ✅ macOS 客户端（launchd 托管，普通转发版；源 IP 保留后续版本支持）
+- ✅ 服务端一键点对点迁移（配置/数据库/证书打包，一次性令牌）
 - ✅ 单体 Go 二进制 + SQLite + 内嵌 Web 控制面板（带证书指纹展示与更新提示）
 - ✅ GitHub Actions 自动交叉编译多平台架构发布 (amd64 / arm64)
 - ✅ 命令行一键检查与自更新 (`opennofrp-server update` / `opennofrp-client update`)

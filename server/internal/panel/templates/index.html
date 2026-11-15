@@ -80,7 +80,7 @@
 
   {{if eq .Page "onboard"}}<section class="card" id="onboard">
     <h2>接入新机器</h2>
-    <p class="desc">生成一条一次性安装命令，在目标内网机器上执行即可完成注册（令牌只能使用一次）。</p>
+    <p class="desc">生成一条一次性安装命令，在目标内网机器（Linux / macOS）上执行即可完成注册（令牌只能使用一次）。</p>
     <form method="post" action="/register-token"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <div class="form-grid">
         <div class="field">
@@ -186,7 +186,8 @@
     {{end}}
   </section>{{end}}
 
-  {{if eq .Page "account"}}<section class="card" id="account">
+  {{if eq .Page "account"}}
+  <section class="card" id="account">
     <h2>修改管理员密码</h2>
     <p class="desc">为了账号安全，修改密码需要输入当前密码，且新密码长度至少 6 位。</p>
     <form method="post" action="/admin/password" style="max-width:340px"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
@@ -196,7 +197,27 @@
       </div>
       <div class="form-actions"><button class="btn btn-primary" type="submit">保存密码</button></div>
     </form>
-  </section>{{end}}
+  </section>
+  <section class="card" id="migration" style="margin-top:1.25rem">
+    <h2>迁移到新服务器</h2>
+    <p class="desc">把整台服务端（配置、规则、客户端凭据、TLS 证书）一键搬到另一台 Linux 机器。全程点对点直连，数据不经过任何第三方。</p>
+    <form method="post" action="/migration-token"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <div class="form-actions">
+        <button class="btn" type="submit" data-confirm="生成迁移命令？迁移令牌 30 分钟内有效且只能下载一次数据。">生成迁移命令</button>
+      </div>
+    </form>
+    {{if .MigrationCommand}}
+    <div style="margin-top:18px">
+      <p class="desc" style="margin-bottom:8px">在<b>新的 Linux 机器</b>上执行以下命令即可完成迁移（令牌 30 分钟内有效，数据仅可下载一次）：</p>
+      <div class="code-block">
+        <pre id="migratecmd" tabindex="0">{{.MigrationCommand}}</pre>
+        <button class="btn btn-sm copy" type="button" data-copy-target="#migratecmd">复制</button>
+      </div>
+      <p class="desc" style="margin-top:8px">迁移完成后先确认新机面板与隧道正常，再去停用旧服务器（<code>systemctl disable --now opennofrp-server</code>）。管理员密码与所有配置保持不变。</p>
+    </div>
+    {{end}}
+  </section>
+  {{end}}
 
   <div class="foot">OpenNoFrp · 纯用户态内网穿透</div>
 </main>

@@ -95,6 +95,13 @@ CREATE TABLE IF NOT EXISTS register_tokens (
 	consumed_by_client_id TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS migration_tokens (
+	token TEXT PRIMARY KEY,
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL,
+	consumed_at INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS rules (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -631,6 +638,61 @@ func (s *Store) ConsumeRegisterToken(ctx context.Context, token, byClientID stri
 		return "", fmt.Errorf("store: commit: %w", err)
 	}
 	return label, nil
+}
+
+// --- 迁移令牌 -------------------------------------------------------
+
+// CreateMigrationToken 生成一个一次性、限时的服务端迁移令牌。管理员在面板
+// 发起“迁移到新服务器”时创建；新机器上的迁移脚本凭它从本机面板拉取完整的
+// 配置/数据库/证书打包。整个令牌生命周期只允许下载一次 bundle。
+func (s *Store) CreateMigrationToken(ctx context.Context, ttl time.Duration) (string, error) {
+	tok, err := randomHex(24)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO migration_tokens (token, created_at, expires_at) VALUES (?, ?, ?)`,
+		tok, now.Unix(), now.Add(ttl).Unix())
+	if err != nil {
+		return "", fmt.Errorf("store: create migration token: %w", err)
+	}
+	return tok, nil
+}
+
+// ConsumeMigrationToken 原子地校验并消费迁移令牌：不存在、已过期或已被
+// 消费均返回错误。一次性语义防止迁移 bundle（含数据库与 TLS 私钥）被重复
+// 下载。
+func (s *Store) ConsumeMigrationToken(ctx context.Context, token string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var expiresAt, consumedAt int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT expires_at, consumed_at FROM migration_tokens WHERE token = ?`, token,
+	).Scan(&expiresAt, &consumedAt)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("migration token not found")
+	}
+	if err != nil {
+		return fmt.Errorf("store: load migration token: %w", err)
+	}
+	if consumedAt != 0 {
+		return fmt.Errorf("migration token already used")
+	}
+	if time.Now().Unix() > expiresAt {
+		return fmt.Errorf("migration token expired")
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE migration_tokens SET consumed_at = ? WHERE token = ?`,
+		time.Now().Unix(), token); err != nil {
+		return fmt.Errorf("store: consume migration token: %w", err)
+	}
+	return tx.Commit()
 }
 
 // --- 客户端 -------------------------------------------------------------
