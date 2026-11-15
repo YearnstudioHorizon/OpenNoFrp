@@ -432,29 +432,17 @@ func friendlyMsg(s string) string {
 	if strings.HasPrefix(s, "bad guard deny ") {
 		return fmt.Sprintf("访问黑名单条目 %s 无效，请填写 IP 或 CIDR（如 203.0.113.0/24）", strings.TrimPrefix(s, "bad guard deny "))
 	}
-	if strings.HasPrefix(s, "bad backend ") {
-		return fmt.Sprintf("额外后端 %s 无效，请填写 IP:端口（如 192.168.1.10:8080）", strings.TrimPrefix(s, "bad backend "))
-	}
-	if s == "too many backends" {
-		return "额外后端过多（上限 32 个）"
-	}
 	if s == "bad port range" {
 		return "端口段无效：结束端口须不小于起始端口，单条规则最多 1000 个端口，且映射后的本地端口不能超过 65535"
 	}
 	if s == "port range protocol" {
 		return "端口段仅支持 TCP、UDP 或 TCP+UDP 规则"
 	}
-	if s == "port range backends" {
-		return "端口段规则不支持多后端负载均衡"
-	}
 	if s == "bad proxy protocol" {
 		return "Proxy Protocol 版本无效，仅支持关闭、v1 或 v2"
 	}
 	if s == "proxy protocol udp" {
 		return "UDP 规则不支持 Proxy Protocol"
-	}
-	if s == "bad lb strategy" {
-		return "负载均衡策略无效，仅支持轮询、随机或主备"
 	}
 	if s == "bad guard limit" {
 		return "连接数 / 速率 / 带宽上限无效，请填写非负整数（留空或 0 表示不限制）"
@@ -933,32 +921,6 @@ func (p *Panel) parseRuleForm(r *http.Request, clientID string, excludeID int64)
 	if rule.BandwidthKBps, okLimit = parseLimit("bandwidth_kbps", 10000000); !okLimit {
 		return store.Rule{}, "bad guard limit"
 	}
-	// 多后端负载均衡：额外后端 "ip:port"（每行或逗号分隔），主后端仍为本地 IP:端口。
-	if protocol != "udp" {
-		var backends []string
-		for _, b := range strings.FieldsFunc(r.FormValue("backends"), func(c rune) bool {
-			return c == ',' || c == ' ' || c == ';' || c == '\n' || c == '\r' || c == '\t'
-		}) {
-			h, port, err := net.SplitHostPort(b)
-			pn, perr := strconv.Atoi(port)
-			if err != nil || net.ParseIP(h) == nil || perr != nil || pn <= 0 || pn > 65535 {
-				return store.Rule{}, "bad backend " + b
-			}
-			backends = append(backends, net.JoinHostPort(h, strconv.Itoa(pn)))
-		}
-		if len(backends) > 32 {
-			return store.Rule{}, "too many backends"
-		}
-		rule.Backends = strings.Join(backends, ",")
-		switch lb := strings.TrimSpace(r.FormValue("lb_strategy")); lb {
-		case "", "round_robin", "random", "failover":
-			if len(backends) > 0 {
-				rule.LBStrategy = lb
-			}
-		default:
-			return store.Rule{}, "bad lb strategy"
-		}
-	}
 	// Proxy Protocol v1/v2：Client 拨通后端后先写入 PROXY 头（tcp/http/tls 规则）。
 	switch pp := strings.TrimSpace(r.FormValue("proxy_protocol")); pp {
 	case "", "0":
@@ -982,9 +944,6 @@ func (p *Panel) parseRuleForm(r *http.Request, clientID string, excludeID int64)
 			}
 			if end-remotePort+1 > 1000 || localPort+(end-remotePort) > 65535 {
 				return store.Rule{}, "bad port range"
-			}
-			if rule.Backends != "" {
-				return store.Rule{}, "port range backends"
 			}
 			for port := remotePort; port <= end; port++ {
 				if reason, isReserved := reserved[uint16(port)]; isReserved {

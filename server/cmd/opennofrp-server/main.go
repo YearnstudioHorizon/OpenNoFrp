@@ -649,12 +649,8 @@ func toWireRules(rules []store.Rule) []protocol.Rule {
 			ID: r.ID, Name: r.Name, Protocol: protocol.RuleProtocol(r.Protocol),
 			LocalIP: r.LocalIP, LocalPort: r.LocalPort, RemotePort: r.RemotePort,
 			PreserveSourceIP: r.PreserveSourceIP,
-			Backends: strings.FieldsFunc(r.Backends, func(c rune) bool {
-				return c == ',' || c == ' ' || c == ';' || c == '\n' || c == '\r' || c == '\t'
-			}),
-			LBStrategy:    r.LBStrategy,
-			ProxyProtocol: r.ProxyProtocol,
-			RemotePortEnd: r.RemotePortEnd,
+			ProxyProtocol:    r.ProxyProtocol,
+			RemotePortEnd:    r.RemotePortEnd,
 		})
 	}
 	return out

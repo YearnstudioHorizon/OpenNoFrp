@@ -114,8 +114,6 @@ type apiRule struct {
 	MaxConnsPerIP    int      `json:"max_conns_per_ip,omitempty"`
 	ConnRatePerMin   int      `json:"conn_rate_per_min,omitempty"`
 	BandwidthKBps    int      `json:"bandwidth_kbps,omitempty"`
-	Backends         string   `json:"backends,omitempty"`
-	LBStrategy       string   `json:"lb_strategy,omitempty"`
 	HasOfflinePage   bool     `json:"has_offline_page,omitempty"`
 	HasNotFoundPage  bool     `json:"has_not_found_page,omitempty"`
 }
@@ -137,7 +135,6 @@ func toAPIRule(r store.Rule) apiRule {
 		HostRewrite: r.HostRewrite, ReqHeaders: r.ReqHeaders, RespHeaders: r.RespHeaders, BasicAuthUsers: users,
 		IPAllow: r.IPAllow, GuardAllow: r.GuardAllow, GuardDeny: r.GuardDeny,
 		MaxConnsPerIP: r.MaxConnsPerIP, ConnRatePerMin: r.ConnRatePerMin, BandwidthKBps: r.BandwidthKBps,
-		Backends: r.Backends, LBStrategy: r.LBStrategy,
 		HasOfflinePage: strings.TrimSpace(r.OfflinePage) != "", HasNotFoundPage: strings.TrimSpace(r.NotFoundPage) != "",
 	}
 }

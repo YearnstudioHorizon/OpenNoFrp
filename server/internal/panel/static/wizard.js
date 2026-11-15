@@ -73,7 +73,7 @@
   moveFields(['remote_port', 'remote_port_end', 'domains', 'tls_mode'], steps[2].fields);
   Array.from(grid.children).forEach(field => { if (field.classList.contains('step-title')) field.remove(); else steps[3].fields.append(field); });
   grid.remove();
-  const accessTip = document.createElement('p'); accessTip.className = 'wizard-tip'; accessTip.textContent = '保留来源 IP 需要内网机器具备相应权限。普通转发可关闭；负载均衡和访问限制按需设置即可。'; steps[3].step.prepend(accessTip);
+  const accessTip = document.createElement('p'); accessTip.className = 'wizard-tip'; accessTip.textContent = '保留来源 IP 需要内网机器具备相应权限。普通转发可关闭；访问限制按需设置即可。'; steps[3].step.prepend(accessTip);
   const preview = secondPart.querySelector('.connection-preview'); if (preview) steps[4].step.prepend(preview);
   const review = document.createElement('dl'); review.className = 'wizard-review'; steps[4].fields.append(review);
   const actions = form.querySelector('.form-actions');

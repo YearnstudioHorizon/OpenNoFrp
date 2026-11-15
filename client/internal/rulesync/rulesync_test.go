@@ -5,13 +5,8 @@ package rulesync
 import (
 	"bytes"
 	"encoding/binary"
-	"io"
 	"net"
-	"reflect"
 	"testing"
-	"time"
-
-	"opennofrp/pkg/protocol"
 )
 
 func TestBuildProxyHeaderV1(t *testing.T) {
@@ -61,81 +56,5 @@ func TestBuildProxyHeaderV2(t *testing.T) {
 	local, _ := buildProxyHeader(2, nil, 0, nil, 0)
 	if len(local) != 16 || local[12] != 0x20 {
 		t.Errorf("bad v2 LOCAL header: % x", local)
-	}
-}
-
-func TestRuleTargets(t *testing.T) {
-	rule := protocol.Rule{LocalIP: "127.0.0.1", LocalPort: 80, Backends: []string{"127.0.0.1:80", " 10.0.0.2:8080 ", "bad", "host.example:80", "10.0.0.3:8080"}}
-	want := []string{"127.0.0.1:80", "10.0.0.2:8080", "10.0.0.3:8080"}
-	if got := ruleTargets(rule); !reflect.DeepEqual(got, want) {
-		t.Errorf("ruleTargets = %v want %v", got, want)
-	}
-	tr, ok := withTarget(rule, "10.0.0.2:8080")
-	if !ok || tr.LocalIP != "10.0.0.2" || tr.LocalPort != 8080 {
-		t.Errorf("withTarget = %+v %v", tr, ok)
-	}
-}
-
-func TestBackendPoolOrder(t *testing.T) {
-	p := newBackendPool()
-	rule := protocol.Rule{ID: 1, LocalIP: "10.0.0.1", LocalPort: 80, Backends: []string{"10.0.0.2:80", "10.0.0.3:80"}}
-
-	// 轮询：每次的首选后端依次轮换
-	firsts := map[string]bool{}
-	for i := 0; i < 3; i++ {
-		firsts[p.order(rule)[0]] = true
-	}
-	if len(firsts) != 3 {
-		t.Errorf("round robin did not rotate: %v", firsts)
-	}
-
-	// 主备：保持配置顺序；不健康的后端排到最后
-	rule.LBStrategy = "failover"
-	if got := p.order(rule); !reflect.DeepEqual(got, []string{"10.0.0.1:80", "10.0.0.2:80", "10.0.0.3:80"}) {
-		t.Errorf("failover order = %v", got)
-	}
-	p.markFailed("10.0.0.1:80")
-	if got := p.order(rule); !reflect.DeepEqual(got, []string{"10.0.0.2:80", "10.0.0.3:80", "10.0.0.1:80"}) {
-		t.Errorf("failover with unhealthy primary = %v", got)
-	}
-	p.markOK("10.0.0.1:80")
-	if got := p.order(rule)[0]; got != "10.0.0.1:80" {
-		t.Errorf("recovered primary not preferred: %v", got)
-	}
-
-	// 随机：结果是全部后端的一个排列
-	rule.LBStrategy = "random"
-	if got := p.order(rule); len(got) != 3 {
-		t.Errorf("random order = %v", got)
-	}
-
-	// 单后端规则直接返回主后端
-	if got := p.order(protocol.Rule{LocalIP: "127.0.0.1", LocalPort: 22}); !reflect.DeepEqual(got, []string{"127.0.0.1:22"}) {
-		t.Errorf("single backend = %v", got)
-	}
-}
-
-func TestTouchConn(t *testing.T) {
-	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
-	tc := &touchConn{Conn: a}
-	if tc.touched.Load() {
-		t.Fatal("touched before use")
-	}
-	a.SetDeadline(time.Now().Add(time.Second))
-	b.SetDeadline(time.Now().Add(time.Second))
-	go b.Read(make([]byte, 1))
-	if _, err := tc.Write([]byte{1}); err != nil {
-		t.Fatalf("write failed: %v", err)
-	}
-	if !tc.touched.Load() {
-		t.Errorf("write did not mark touched")
-	}
-	if err := tc.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tc.Write([]byte{1}); err != io.ErrClosedPipe {
-		t.Fatalf("Close must close the underlying stream: %v", err)
 	}
 }

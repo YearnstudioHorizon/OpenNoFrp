@@ -17,7 +17,7 @@ func TestRelayErrorClosesTouchedStream(t *testing.T) {
 	defer service.Close()
 	done := make(chan struct{})
 	go func() {
-		relay(&touchConn{Conn: stream}, upstream)
+		relay(stream, upstream)
 		close(done)
 	}()
 	// A local service read error must also wake the stream reader.

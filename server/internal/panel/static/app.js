@@ -91,7 +91,7 @@ if (editor) {
     ['网站与证书', '域名、路径与 HTTPS', ['domains', 'path_prefix', 'tls_mode', 'redirect_https', 'tls_cert', 'tls_key']],
     ['真实 IP 与代理', '来源识别与可信代理', ['ip_sources', 'trusted_proxies']],
     ['HTTP 高级设置', '请求头、认证与自定义页面', ['offline_page', 'strip_prefix', 'host_rewrite', 'req_headers', 'resp_headers', 'basic_auth', 'ip_allow', 'not_found_page']],
-    ['转发策略', '负载均衡与 PROXY 协议', ['backends', 'lb_strategy', 'proxy_protocol']],
+    ['转发策略', 'PROXY 协议', ['proxy_protocol']],
     ['访问防护', '访问控制、并发与带宽限制', ['guard_allow', 'guard_deny', 'max_conns_per_ip', 'conn_rate_per_min', 'bandwidth_kbps']]
   ];
   const toggles = grid && grid.querySelector('[name="enabled"]')?.closest('.check-stack');
@@ -103,7 +103,7 @@ if (editor) {
     const inner = document.createElement('div'); inner.className = 'form-grid'; fields.forEach(field => inner.append(field)); details.append(summary, inner);
     grid.insertBefore(details, toggles || null);
     const isEdit = editor.action.includes('/edit');
-    details.open = title === '网站与证书' || (isEdit && fields.some(field => Array.from(field.querySelectorAll('input,textarea,select')).some(control => control.type === 'checkbox' ? control.checked : control.value && control.value !== 'round_robin')));
+    details.open = title === '网站与证书' || (isEdit && fields.some(field => Array.from(field.querySelectorAll('input,textarea,select')).some(control => control.type === 'checkbox' ? control.checked : control.value && control.value !== '0')));
   });
   function syncGroups() {
     editor.querySelectorAll('.advanced-group').forEach(group => { group.hidden = Array.from(group.querySelector('.form-grid').children).every(field => field.hidden); });

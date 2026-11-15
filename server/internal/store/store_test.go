@@ -182,7 +182,7 @@ INSERT INTO rules (client_id, name, protocol, local_port, remote_port, enabled, 
 	}
 	full := Rule{ClientID: "c1", Name: "full", Protocol: "tls", LocalIP: "127.0.0.1", LocalPort: 8443, RemotePort: 443,
 		Domains: "x.com", GuardDeny: "10.0.0.0/8", MaxConnsPerIP: 3, BandwidthKBps: 100,
-		Backends: "127.0.0.2:8443", LBStrategy: "failover", ProxyProtocol: 2}
+		ProxyProtocol: 2}
 	id, err := st.CreateRule(ctx, full)
 	if err != nil {
 		t.Fatalf("create tls rule after migration: %v", err)
@@ -192,7 +192,7 @@ INSERT INTO rules (client_id, name, protocol, local_port, remote_port, enabled, 
 		t.Fatal(err)
 	}
 	if got.Protocol != "tls" || got.GuardDeny != full.GuardDeny || got.MaxConnsPerIP != 3 || got.BandwidthKBps != 100 ||
-		got.Backends != full.Backends || got.LBStrategy != "failover" || got.ProxyProtocol != 2 {
+		got.ProxyProtocol != 2 {
 		t.Errorf("new fields roundtrip failed: %+v", got)
 	}
 	if _, err := st.CreateRule(ctx, Rule{ClientID: "c1", Name: "range", Protocol: "udp", LocalPort: 30000, RemotePort: 30000, RemotePortEnd: 30009}); err != nil {

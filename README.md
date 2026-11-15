@@ -108,7 +108,6 @@ OpenNoFrp/
 - ✅ HTTPS（ACME 自动证书 / 自定义证书 / HTTP 自动跳转）与 TLS 透传（按 SNI 分流，不解密）
 - ✅ HTTP 路由选项：剥离路径前缀、Host 改写、自定义请求/响应头、Basic Auth、IP 白名单、端口级 404 页面
 - ✅ 规则级防护：IP 黑白名单、单 IP 并发与速率限制、规则带宽上限
-- ✅ 多后端负载均衡与故障转移（轮询/随机/主备 + TCP 健康检查）
 - ✅ 可选 Proxy Protocol v1/v2、UDP 源 IP 保留、端口段规则
 - ✅ 规则统计、Prometheus `/metrics`、REST API（`/api/v1/*`）与 API 令牌
 - ✅ 面板安全：CSRF 校验、可选面板 HTTPS、登录会话持久化
