@@ -5,10 +5,9 @@
 // 完整的 RulesSnapshot 消息，并根据每个流的元数据中携带的规则 ID，把传入的
 // 连接流分发到正确的本地端点。
 //
-// 平台差异通过两个钩子隔离（见 spoofer_linux.go / spoofer_darwin.go）：
+// 平台差异由 spoofer_linux.go 和 spoofer_darwin.go 实现：
 // Linux 依据对本地目标端口归属者的探测结果，在宿主机或容器 netns 中使用
-// TPROXY 式伪造源地址拨号以保留真实源 IP；macOS 暂不支持源 IP 保留，
-// 开启该选项的规则会自动降级为普通转发。
+// TPROXY 式伪造源地址拨号以保留真实源 IP；macOS 使用 utun 和 PF 保留源 IP。
 package rulesync
 
 import (
@@ -33,6 +32,7 @@ type Reconciler struct {
 	rules         map[uint32]protocol.Rule
 	preparedNetns map[int]bool // 容器 PID -> 其 netns 是否已配置 sysctls+路由（仅 Linux 使用）
 	hostSetupDone bool
+	source        platformSource
 }
 
 func New(logger *slog.Logger, stateDir string) *Reconciler {
@@ -52,9 +52,6 @@ func (r *Reconciler) Apply(rules []protocol.Rule) {
 	r.rules = make(map[uint32]protocol.Rule, len(rules))
 	for _, rule := range rules {
 		r.rules[uint32(rule.ID)] = rule
-		if rule.PreserveSourceIP && !sourceIPSupported() {
-			r.Logger.Warn("rule requests source IP preservation, unsupported on this platform; plain forwarding will be used", "rule", rule.Name)
-		}
 	}
 	r.Logger.Info("rules snapshot applied", "count", len(rules))
 }

@@ -26,11 +26,11 @@ curl -fsSL https://mirror.yearnstudio.cn/https://raw.githubusercontent.com/Yearn
 ```bash
 curl -fsSL "http://<服务器IP>:8080/install_client.sh?token=<TOKEN>&fingerprint=<FINGERPRINT>" | sudo bash
 ```
-内网客户端无需任何手动配置，命令执行完毕即刻完成 TLS 安全通道握手并连接就绪。支持 **Linux**（完整功能）与 **macOS**（普通转发版）。
+内网客户端无需任何手动配置，命令执行完毕即刻完成 TLS 安全通道握手并连接就绪。支持 **Linux** 与 **macOS**。
 
 > [!NOTE]
 > **macOS 客户端**：`opennofrp-client-darwin-amd64/arm64` 通过 launchd 托管运行。
-> macOS 版暂不支持“保留访问者源 IP”（依赖 Linux TPROXY），开启该选项的规则会自动降级为普通转发；除此之外的 TCP/UDP/HTTP/TLS 转发、端口段、Proxy Protocol 等功能与 Linux 版一致。
+> 在面板开启规则的「保留来源 IP」后，绑定到本机 IPv4 回环地址的 TCP、UDP、HTTP 和 TLS 后端可从连接或数据报直接获取访客的 IPv4 地址。客户端需以 root 运行（一键安装的 launchd 服务已满足），并使用 macOS 默认 PF ruleset 中的 `com.apple/*` 锚点。IPv6 访客、非回环目标或 PF 初始化失败时使用普通转发。
 
 ## 服务端一键迁移（点对点）
 
@@ -119,7 +119,7 @@ OpenNoFrp/
 - ✅ 端到端 TLS 通道加密与 SHA-256 证书指纹绑定 (Certificate Pinning)
 - ✅ 共享协议包、Client/Server 核心代码、TPROXY helper
 - ✅ netns-worker 宿主/bridge 容器自动感知
-- ✅ macOS 客户端（launchd 托管，普通转发版；源 IP 保留后续版本支持）
+- ✅ macOS 客户端（launchd 托管，支持保留 IPv4 来源地址）
 - ✅ 服务端一键点对点迁移（配置/数据库/证书打包，一次性令牌）
 - ✅ 单体 Go 二进制 + SQLite + 内嵌 Web 控制面板（带证书指纹展示与更新提示）
 - ✅ GitHub Actions 自动交叉编译多平台架构发布 (amd64 / arm64)
