@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -77,7 +78,7 @@ func CheckUpdate(ctx context.Context, currentVersion string) (*UpdateInfo, error
 	}
 
 	var rel GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&rel); err != nil {
 		return nil, fmt.Errorf("updater: 解析 Release JSON 失败: %w", err)
 	}
 
@@ -152,7 +153,7 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 	}
 
 	var rel GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&rel); err != nil {
 		return fmt.Errorf("解析版本信息失败: %w", err)
 	}
 
@@ -173,17 +174,12 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 		targetName += ".exe"
 	}
 
-	var downloadURL string
-	for _, a := range rel.Assets {
-		if a.Name == targetName {
-			downloadURL = a.BrowserDownloadURL
-			break
-		}
+	releaseURL := "https://github.com/" + GitHubRepo + "/releases/download/" + latestTag
+	digest, err := fetchVerifiedDigest(ctx, releaseURL, latestTag, targetName)
+	if err != nil {
+		return err
 	}
-
-	if downloadURL == "" {
-		return fmt.Errorf("在 %s 的 Release 中未找到适用于当前平台 (%s/%s) 的二进制文件: %s", latestTag, runtime.GOOS, runtime.GOARCH, targetName)
-	}
+	downloadURL := releaseURL + "/" + targetName
 
 	const mirrorPrefix = "https://mirror.yearnstudio.cn/"
 
@@ -198,7 +194,7 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 	}
 
 	// 创建临时文件写入
-	tmpFile, err := os.CreateTemp(filepath.Dir(execPath), "opennofrp-update-*")
+	tmpFile, err := os.CreateTemp(filepath.Dir(execPath), "opennofrp-update-*"+filepath.Ext(targetName))
 	if err != nil {
 		return fmt.Errorf("创建临时文件失败: %w", err)
 	}
@@ -210,6 +206,10 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 		return err
 	}
 
+	if err := digest.verify(tmpFile.Name()); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
 	if err := tmpFile.Sync(); err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("同步升级文件失败: %w", err)
@@ -234,11 +234,26 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 		if n < 4 || !bytes.Equal(magic[:4], []byte("\x7fELF")) {
 			return fmt.Errorf("下载的文件不是有效的 Linux 可执行程序（可能包含 HTML 错误页或被篡改）")
 		}
+	} else if runtime.GOOS == "darwin" {
+		if n < 4 || (!bytes.Equal(magic[:], []byte("\xcf\xfa\xed\xfe")) &&
+			!bytes.Equal(magic[:], []byte("\xfe\xed\xfa\xcf"))) {
+			return fmt.Errorf("download is not a supported macOS executable")
+		}
 	}
 
 	// 赋予可执行权限
 	if err := os.Chmod(tmpFile.Name(), 0o755); err != nil {
 		return fmt.Errorf("修改权限失败: %w", err)
+	}
+
+	probeCtx, cancelProbe := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelProbe()
+	out, err := exec.CommandContext(probeCtx, tmpFile.Name(), "version").Output()
+	if err != nil || !strings.HasPrefix(string(out), componentName+" "+latestTag+" (") {
+		return fmt.Errorf("verified binary failed executable version check")
+	}
+	if err := backupExecutable(execPath); err != nil {
+		return err
 	}
 
 	// 在 Linux 上执行原子重命名替换 (即使原程序正在运行，inode 替换也是安全的)
@@ -271,30 +286,7 @@ func downloadAssetToFile(ctx context.Context, tmpFile *os.File, downloadURL, mir
 		if err := tmpFile.Truncate(0); err != nil {
 			return err
 		}
-		dCtx, dCancel := context.WithTimeout(ctx, timeout)
-		defer dCancel()
-		req, err := http.NewRequestWithContext(dCtx, http.MethodGet, targetURL, nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("User-Agent", "OpenNoFrp-Updater/"+version.Version)
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("HTTP %d", resp.StatusCode)
-		}
-		written, err := io.Copy(tmpFile, io.LimitReader(resp.Body, 200<<20))
-		if err != nil {
-			return err
-		}
-		if written == 0 {
-			return errors.New("下载的文件为空")
-		}
-		return nil
+		return downloadBounded(ctx, tmpFile, targetURL, timeout, maxAssetSize)
 	}
 
 	downErr := downloadToFile(downloadURL, directDownloadTimeout)
@@ -306,6 +298,67 @@ func downloadAssetToFile(ctx context.Context, tmpFile *os.File, downloadURL, mir
 		}
 	}
 	return nil
+}
+
+func downloadBounded(ctx context.Context, dst io.Writer, rawURL string, timeout time.Duration, maxSize int64) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "OpenNoFrp-Updater/"+version.Version)
+	client := &http.Client{CheckRedirect: func(next *http.Request, via []*http.Request) error {
+		if len(via) >= 10 || (req.URL.Scheme == "https" && next.URL.Scheme != "https") {
+			return fmt.Errorf("unexpected download redirect")
+		}
+		return nil
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxSize {
+		return fmt.Errorf("download exceeds %d bytes", maxSize)
+	}
+	written, err := io.Copy(dst, io.LimitReader(resp.Body, maxSize+1))
+	if err != nil {
+		return err
+	}
+	if written == 0 || written > maxSize {
+		return errors.New("download is empty or exceeds size limit")
+	}
+	return nil
+}
+
+func backupExecutable(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	backup, err := os.CreateTemp(filepath.Dir(path), ".opennofrp-backup-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(backup.Name())
+	if _, err := io.Copy(backup, f); err != nil {
+		backup.Close()
+		return err
+	}
+	if err := errors.Join(backup.Chmod(0755), backup.Sync(), backup.Close()); err != nil {
+		return err
+	}
+	return os.Rename(backup.Name(), path+".bak")
+}
+
+// RestorePrevious is used when an in-process restart fails before exec.
+func RestorePrevious(path string) error {
+	return os.Rename(path+".bak", path)
 }
 
 // compareVersions 比较两个语义化版本号，若 latest 比 current 新则返回 true

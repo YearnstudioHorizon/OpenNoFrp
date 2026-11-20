@@ -16,12 +16,10 @@
 
 set -euo pipefail
 
-REPO="YearnstudioHorizon/OpenNoFrp"
-MIRROR_PREFIX="https://mirror.yearnstudio.cn/"
-INSTALL_DIR="/opt/opennofrp"
-CONFIG_DIR="/etc/opennofrp"
+INSTALL_DIR="/opt/opennofrp-server"
+CONFIG_DIR="/etc/opennofrp-server"
 CONFIG_FILE="$CONFIG_DIR/server.toml"
-DATA_DIR="/var/lib/opennofrp"
+DATA_DIR="/var/lib/opennofrp-server"
 CLIENT_BINS_DIR="$INSTALL_DIR/client-bins"
 SERVICE_NAME="opennofrp-server"
 SYSTEMD_UNIT="/etc/systemd/system/$SERVICE_NAME.service"
@@ -51,6 +49,14 @@ detect_arch() {
 
 ARCH="$(detect_arch)"
 LOCAL_SRC="${1:-}"
+
+# Keep legacy server data in place. The low-privilege process may read its old
+# configuration, but root never rewrites paths inside its previous shared tree.
+LEGACY_CONFIG=0
+if [ ! -f "$CONFIG_FILE" ] && [ -f /etc/opennofrp/server.toml ]; then
+  CONFIG_FILE=/etc/opennofrp/server.toml
+  LEGACY_CONFIG=1
+fi
 
 IS_UPGRADE=0
 if [ -f "$BINARY_DEST" ] || [ -f "$SYSTEMD_UNIT" ]; then
@@ -147,123 +153,10 @@ verify_service() {
 # 网络下载工具函数
 # ----------------------------------------------------------------------
 # 缓存获取到的最新发布标签
-LATEST_TAG=""
-
-# safe_curl 封装高可靠网络请求：优先使用 IPv4 (-4) 规避国内部分双栈网络下 IPv6 路由黑洞导致的 SSL 连接超时 (SSL connection timeout)
-safe_curl_get() {
-  local url="$1"
-  local timeout="${2:-10}"
-  # 优先 IPv4
-  curl -4 -s --connect-timeout 6 -m "$timeout" "$url" 2>/dev/null || curl -s --connect-timeout 6 -m "$timeout" "$url" 2>/dev/null
-}
-
-safe_curl_download() {
-  local url="$1"
-  local dest="$2"
-  local timeout="${3:-180}"
-  # 优先 IPv4 规避 Cloudflare IPv6 握手超时，并附带重试机制
-  if curl -4 -fsSL --connect-timeout 15 -m "$timeout" --retry 2 --retry-delay 1 "$url" -o "$dest" 2>/dev/null; then
-    return 0
-  fi
-  # 兼容纯 IPv6 环境的回退
-  if curl -fsSL --connect-timeout 15 -m "$timeout" "$url" -o "$dest" 2>/dev/null; then
-    return 0
-  fi
-  rm -f "$dest"
-  return 1
-}
-
-get_latest_tag() {
-  if [ -n "$LATEST_TAG" ]; then
-    echo "$LATEST_TAG"
-    return 0
-  fi
-
-  local tag=""
-  # 1. 优先尝试从 releases/latest 的 HTTP Location 头提取 (无 API 限额限制)
-  local loc
-  loc=$(curl -4 -sI --connect-timeout 6 -m 8 "https://github.com/$REPO/releases/latest" 2>/dev/null | grep -i "^location:" | tr -d "\r\n" || true)
-  if [ -z "$loc" ]; then
-    loc=$(curl -sI --connect-timeout 6 -m 8 "https://github.com/$REPO/releases/latest" 2>/dev/null | grep -i "^location:" | tr -d "\r\n" || true)
-  fi
-  if [ -n "$loc" ]; then
-    tag=$(echo "$loc" | awk -F"/tag/" '{print $2}' | tr -d " \r\n")
-  fi
-
-  # 2. 次选尝试官方 API 直连
-  if [ -z "$tag" ]; then
-    tag=$(safe_curl_get "https://api.github.com/repos/$REPO/releases/latest" 8 | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
-  fi
-
-  # 3. 直连超时，通过国内镜像加速访问官方 API 提取 tag
-  if [ -z "$tag" ]; then
-    tag=$(safe_curl_get "${MIRROR_PREFIX}https://api.github.com/repos/$REPO/releases/latest" 10 | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
-  fi
-
-  LATEST_TAG="$tag"
-  echo "$tag"
-}
-
-# 记录是否应优先走镜像：一旦某次下载直连失败而镜像成功，后续下载 (如客户端预拉取) 直接优先使用镜像，避免重复等待直连超时
-PREFER_MIRROR=0
-
-download_from_gh() {
-  local asset_name="$1"
-  local dest_path="$2"
-  local tag
-  # 注意：不在 $(...) 子 shell 中赋值缓存，否则 LATEST_TAG 无法跨调用保留
-  if [ -z "$LATEST_TAG" ]; then
-    LATEST_TAG="$(get_latest_tag)"
-  fi
-  tag="$LATEST_TAG"
-
-  log "正在获取 $asset_name ..."
-
-  # 若成功解析到 Tag，构造确切的 Release 资源路径（镜像对确切路径支持最佳，不会因 302 跨域重定向报 502）
-  if [ -n "$tag" ]; then
-    local gh_url="https://github.com/$REPO/releases/download/$tag/$asset_name"
-    local mirror_url="${MIRROR_PREFIX}${gh_url}"
-
-    if [ "$PREFER_MIRROR" -eq 1 ]; then
-      # 之前直连已超时，本次优先走镜像，失败再回退直连
-      log "此前 GitHub 直连超时，本次优先使用国内加速镜像 ($MIRROR_PREFIX) ..."
-      if safe_curl_download "$mirror_url" "$dest_path" 180; then
-        log "已通过 YearnStudio 加速镜像 ($tag) 下载成功"
-        return 0
-      fi
-      log "加速镜像下载失败，尝试回退 GitHub 直连 ..."
-      if safe_curl_download "$gh_url" "$dest_path" 120; then
-        log "已从 GitHub Releases 官方源 ($tag) 下载成功"
-        PREFER_MIRROR=0
-        return 0
-      fi
-    else
-      # 优先尝试 GitHub 直连
-      if safe_curl_download "$gh_url" "$dest_path" 120; then
-        log "已从 GitHub Releases 官方源 ($tag) 下载成功"
-        return 0
-      fi
-
-      # 直连超时，切换至国内镜像加速 (优先走稳定的 IPv4 Anycast 节点)
-      log "GitHub 直连超时，正在自动切换至国内加速镜像 ($MIRROR_PREFIX) ..."
-      if safe_curl_download "$mirror_url" "$dest_path" 180; then
-        log "已通过 YearnStudio 加速镜像 ($tag) 下载成功，后续下载将优先使用镜像"
-        PREFER_MIRROR=1
-        return 0
-      fi
-    fi
-  else
-    # 极端未解析到 tag 时的直连兜底
-    local gh_latest="https://github.com/$REPO/releases/latest/download/$asset_name"
-    if safe_curl_download "$gh_latest" "$dest_path" 120; then
-      log "已从 GitHub Releases 官方源直接下载成功"
-      return 0
-    fi
-  fi
-
-  err "从官方源和加速镜像下载 $asset_name 均失败，请检查网络连接！"
-  return 1
-}
+if ! declare -F release_metadata >/dev/null; then
+  # Source checkout mode. The published installer embeds this helper.
+  source "$(dirname -- "${BASH_SOURCE[0]}")/../pkg/updater/release.sh"
+fi
 
 # ----------------------------------------------------------------------
 # 1. 先下载全部新版本文件到临时目录 (此阶段不触碰正在运行的服务)
@@ -280,7 +173,8 @@ if [ -n "$LOCAL_SRC" ] && [ -f "$LOCAL_SRC" ]; then
   cp "$LOCAL_SRC" "$STAGE_SERVER"
 else
   log "未指定本地文件，正在联网自动匹配 linux/$ARCH 对应最新版本..."
-  if ! download_from_gh "opennofrp-server-linux-$ARCH" "$STAGE_SERVER"; then
+  release_metadata "$TMP_DIR"
+  if ! download_release_asset "opennofrp-server-linux-$ARCH" "$STAGE_SERVER"; then
     err "新版本下载失败，未对现有服务做任何改动。"
     exit 1
   fi
@@ -292,12 +186,13 @@ if [ ! -s "$STAGE_SERVER" ]; then
 fi
 chmod 0755 "$STAGE_SERVER"
 
-# 预拉取客户端二进制文件 (先放在临时目录，替换成功后再落盘)
-log "正在预拉取客户端二进制文件 (用于服务器托管分发)..."
-download_from_gh "opennofrp-client-linux-$ARCH" "$STAGE_CLIENT_DIR/opennofrp-client-linux-$ARCH" || warn "客户端 linux/$ARCH 预拉取失败，将保留现有托管文件"
-download_from_gh "opennofrp-client-linux-arm64" "$STAGE_CLIENT_DIR/opennofrp-client-linux-arm64" 2>/dev/null || true
-download_from_gh "opennofrp-client-darwin-amd64" "$STAGE_CLIENT_DIR/opennofrp-client-darwin-amd64" 2>/dev/null || true
-download_from_gh "opennofrp-client-darwin-arm64" "$STAGE_CLIENT_DIR/opennofrp-client-darwin-arm64" 2>/dev/null || true
+# Cache only client binaries that match the same signed release manifest.
+if [ -n "${RELEASE_TAG:-}" ]; then
+  for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+    asset="opennofrp-client-$platform"
+    download_release_asset "$asset" "$STAGE_CLIENT_DIR/$asset" || warn "无法缓存 $asset"
+  done
+fi
 
 # ----------------------------------------------------------------------
 # 2. 创建专用低权限服务账户与持久化目录 (不影响运行中的服务)
@@ -309,10 +204,12 @@ else
   log "专用账户 '$SERVICE_USER' 已存在，直接复用"
 fi
 
-mkdir -p "$INSTALL_DIR" "$CLIENT_BINS_DIR" "$CONFIG_DIR" "$DATA_DIR"
-chmod 0750 "$CONFIG_DIR"
-chmod 0700 "$DATA_DIR"
-chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
+for dir in "$INSTALL_DIR" "$CLIENT_BINS_DIR" "$CONFIG_DIR" "$DATA_DIR"; do
+  if [ -L "$dir" ]; then err "Refusing symlink: $dir"; exit 1; fi
+done
+install -d -m 0755 -o root -g root "$INSTALL_DIR" "$CLIENT_BINS_DIR"
+install -d -m 0750 -o root -g "$SERVICE_USER" "$CONFIG_DIR"
+install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIR"
 
 if [ -f "$CONFIG_FILE" ]; then
   log "✓ 检查到已有配置文件 $CONFIG_FILE，已为您完整保留，绝不覆盖！"
@@ -321,7 +218,10 @@ else
   "$STAGE_SERVER" init-config -path "$CONFIG_FILE"
   chmod 0600 "$CONFIG_FILE"
 fi
-chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_FILE"
+if [ "$LEGACY_CONFIG" -eq 0 ]; then
+  chown "root:$SERVICE_USER" "$CONFIG_FILE"
+  chmod 0640 "$CONFIG_FILE"
+fi
 
 # ----------------------------------------------------------------------
 # 3. 备份旧版本并停止旧服务
@@ -358,7 +258,7 @@ fi
 # ----------------------------------------------------------------------
 install -m 0755 "$STAGE_SERVER" "$BINARY_DEST.new"
 mv -f "$BINARY_DEST.new" "$BINARY_DEST"
-chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" "$BINARY_DEST"
+chown root:root "$BINARY_DEST"
 
 log "配置系统守护进程单元: $SYSTEMD_UNIT"
 cat > "$SYSTEMD_UNIT" <<UNIT
@@ -418,7 +318,6 @@ for f in "$STAGE_CLIENT_DIR"/*; do
   [ -s "$f" ] || continue
   install -m 0755 "$f" "$CLIENT_BINS_DIR/$(basename "$f")"
 done
-chown -R "$SERVICE_USER:$SERVICE_USER" "$CLIENT_BINS_DIR"
 
 # ----------------------------------------------------------------------
 # 6. 汇总并展示结果
@@ -426,7 +325,7 @@ chown -R "$SERVICE_USER:$SERVICE_USER" "$CLIENT_BINS_DIR"
 PW_FILE="$DATA_DIR/opennofrp-initial-password.txt"
 PASSWORD="可在日志中查看"
 if [ -f "$PW_FILE" ]; then
-  PASSWORD="$(grep '^password=' "$PW_FILE" | cut -d'=' -f2 || true)"
+  PASSWORD="$(runuser -u "$SERVICE_USER" -- grep '^password=' "$PW_FILE" | cut -d'=' -f2 || true)"
 fi
 
 echo ""
@@ -440,7 +339,7 @@ else
   log "🎉 OpenNoFrp 服务端安装完成并已成功启动！"
 fi
 echo "================================================================="
-echo "  Web 管理控制台:  http://$(curl -s4 ip.sb 2>/dev/null || echo "您的服务器公网IP"):8080"
+echo "  Web 管理控制台:  http://127.0.0.1:8080（远程使用 SSH 转发或配置 HTTPS 反向代理）"
 if [ "$IS_UPGRADE" -eq 1 ]; then
   echo "  管理员账号密码:  已保留您之前设置的管理员密码"
 else

@@ -139,6 +139,16 @@ func toAPIRule(r store.Rule) apiRule {
 	}
 }
 
+func apiRuleForRequest(r *http.Request, rule store.Rule) apiRule {
+	out := toAPIRule(rule)
+	if token, ok := r.Context().Value(apiTokenCtxKey{}).(store.APIToken); ok && token.ReadOnly {
+		// Header names are user-defined and any value can be a credential.
+		out.ReqHeaders = ""
+		out.RespHeaders = ""
+	}
+	return out
+}
+
 // ---- 处理函数 -------------------------------------------------------------
 
 func (p *Panel) apiListClients(w http.ResponseWriter, r *http.Request) {
@@ -200,7 +210,7 @@ func (p *Panel) apiListRules(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]apiRule, 0, len(rules))
 	for _, ru := range rules {
-		out = append(out, toAPIRule(ru))
+		out = append(out, apiRuleForRequest(r, ru))
 	}
 	apiJSON(w, http.StatusOK, map[string]any{"ok": true, "rules": out})
 }
@@ -262,7 +272,8 @@ func (p *Panel) apiCreateRule(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := p.Store.CreateRule(r.Context(), rule)
 	if err != nil {
-		apiError(w, http.StatusInternalServerError, err.Error())
+		p.Logger.Error("panel API: mutation failed", "error", err)
+		apiError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	p.rulesChanged()
@@ -293,7 +304,7 @@ func (p *Panel) apiGetRule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	apiJSON(w, http.StatusOK, map[string]any{"ok": true, "rule": toAPIRule(ru)})
+	apiJSON(w, http.StatusOK, map[string]any{"ok": true, "rule": apiRuleForRequest(r, ru)})
 }
 
 // apiUpdateRule 以请求体整体覆盖规则的可变字段（与面板编辑表单语义相同）。
@@ -319,7 +330,8 @@ func (p *Panel) apiUpdateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.Store.UpdateRule(r.Context(), rule); err != nil {
-		apiError(w, http.StatusInternalServerError, err.Error())
+		p.Logger.Error("panel API: mutation failed", "error", err)
+		apiError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	p.rulesChanged()
@@ -334,7 +346,8 @@ func (p *Panel) apiSetEnabled(enabled bool) http.HandlerFunc {
 			return
 		}
 		if err := p.Store.SetRuleEnabled(r.Context(), ru.ID, enabled); err != nil {
-			apiError(w, http.StatusInternalServerError, err.Error())
+			p.Logger.Error("panel API: mutation failed", "error", err)
+			apiError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		p.rulesChanged()
@@ -348,7 +361,8 @@ func (p *Panel) apiDeleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.Store.DeleteRule(r.Context(), ru.ID); err != nil {
-		apiError(w, http.StatusInternalServerError, err.Error())
+		p.Logger.Error("panel API: mutation failed", "error", err)
+		apiError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	p.rulesChanged()

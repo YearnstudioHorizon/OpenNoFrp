@@ -5,6 +5,10 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
+	"net/url"
+	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -26,10 +30,10 @@ type ServerConfig struct {
 	ControlPort int `toml:"control_port"` // 例如 17000
 
 	// PanelAddr/PanelPort 用于提供管理后台 Web UI。
-	PanelAddr string `toml:"panel_addr"` // 例如 "0.0.0.0"
+	PanelAddr string `toml:"panel_addr"` // 例如 "127.0.0.1"
 	PanelPort int    `toml:"panel_port"` // 例如 8080
 	// PanelTLSCert / PanelTLSKey 同时设置时，面板以 HTTPS 方式提供服务（PEM 文件路径）。
-	// 留空则使用明文 HTTP（建议仅在内网或前置反代时使用）。
+	// 留空时只允许监听回环地址。
 	PanelTLSCert string `toml:"panel_tls_cert"`
 	PanelTLSKey  string `toml:"panel_tls_key"`
 	// MetricsToken 非空时，面板的 /metrics 允许以 "Authorization: Bearer <token>"
@@ -43,16 +47,17 @@ type ServerConfig struct {
 	HeartbeatTimeoutSeconds int `toml:"heartbeat_timeout_seconds"`
 
 	// DBPath 是保存管理员账户、客户端、token、规则和保留端口的 SQLite 文件。
-	DBPath string `toml:"db_path"` // 例如 "/var/lib/opennofrp/opennofrp.db"
+	DBPath string `toml:"db_path"` // 例如 "/var/lib/opennofrp-server/opennofrp.db"
 
 	// ClientBinDir 存放由 /dl/* 提供下载的预编译客户端二进制文件，使一行安装
 	// 命令无需客户端机器安装 Go 即可使用。
-	ClientBinDir string `toml:"client_bin_dir"` // 例如 "/opt/opennofrp/client-bins"
+	ClientBinDir string `toml:"client_bin_dir"` // 例如 "/opt/opennofrp-server/client-bins"
 
 	// PublicBaseURL 是外部用户访问面板所用的基础 URL（scheme://host[:port]）。
-	// 在渲染一行安装命令时使用。默认为
-	// http://<panel_addr-or-detected-host>:<panel_port>。
-	PublicBaseURL string `toml:"public_base_url"`
+	// 启用安装和迁移命令时必须设置 HTTPS 地址。
+	PublicBaseURL       string `toml:"public_base_url"`
+	PanelTrustedProxies string `toml:"panel_trusted_proxies"`
+	ControlHost         string `toml:"control_host"`
 
 	// TLSCertPath / TLSKeyPath 用于控制通道的 TLS 自签名证书与私钥
 	TLSCertPath string `toml:"tls_cert_path"`
@@ -79,6 +84,21 @@ func Load(path string) (*Config, error) {
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return nil, fmt.Errorf("config: decode %s: %w", path, err)
 	}
+	if filepath.Clean(path) == "/etc/opennofrp/server.toml" {
+		if cfg.Server.DBPath == "" {
+			cfg.Server.DBPath = "/var/lib/opennofrp/opennofrp.db"
+		}
+		if cfg.Server.TLSCertPath == "" {
+			cfg.Server.TLSCertPath = "/var/lib/opennofrp/server.crt"
+		}
+		if cfg.Server.TLSKeyPath == "" {
+			cfg.Server.TLSKeyPath = "/var/lib/opennofrp/server.key"
+		}
+		if cfg.Server.ACMECacheDir == "" {
+			cfg.Server.ACMECacheDir = "/var/lib/opennofrp/acme"
+		}
+	}
+
 	applyDefaults(&cfg)
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("config: invalid: %w", err)
@@ -100,7 +120,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Server.ControlPort = 17000
 	}
 	if cfg.Server.PanelAddr == "" {
-		cfg.Server.PanelAddr = "0.0.0.0"
+		cfg.Server.PanelAddr = "127.0.0.1"
 	}
 	if cfg.Server.PanelPort <= 0 {
 		cfg.Server.PanelPort = 8080
@@ -109,19 +129,19 @@ func applyDefaults(cfg *Config) {
 		cfg.Server.HeartbeatTimeoutSeconds = 90
 	}
 	if cfg.Server.DBPath == "" {
-		cfg.Server.DBPath = "/var/lib/opennofrp/opennofrp.db"
+		cfg.Server.DBPath = "/var/lib/opennofrp-server/opennofrp.db"
 	}
 	if cfg.Server.ClientBinDir == "" {
-		cfg.Server.ClientBinDir = "/opt/opennofrp/client-bins"
+		cfg.Server.ClientBinDir = "/opt/opennofrp-server/client-bins"
 	}
 	if cfg.Server.TLSCertPath == "" {
-		cfg.Server.TLSCertPath = "/var/lib/opennofrp/server.crt"
+		cfg.Server.TLSCertPath = "/var/lib/opennofrp-server/server.crt"
 	}
 	if cfg.Server.TLSKeyPath == "" {
-		cfg.Server.TLSKeyPath = "/var/lib/opennofrp/server.key"
+		cfg.Server.TLSKeyPath = "/var/lib/opennofrp-server/server.key"
 	}
 	if cfg.Server.ACMECacheDir == "" {
-		cfg.Server.ACMECacheDir = "/var/lib/opennofrp/acme"
+		cfg.Server.ACMECacheDir = "/var/lib/opennofrp-server/acme"
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
@@ -141,7 +161,29 @@ func validate(cfg *Config) error {
 	if (cfg.Server.PanelTLSCert == "") != (cfg.Server.PanelTLSKey == "") {
 		return fmt.Errorf("server.panel_tls_cert and server.panel_tls_key must be set together")
 	}
+	if cfg.Server.PanelTLSCert == "" {
+		addr, err := netip.ParseAddr(cfg.Server.PanelAddr)
+		if err != nil || !addr.IsLoopback() {
+			return fmt.Errorf("server.panel_addr must be a loopback IP when panel TLS is disabled")
+		}
+	}
+	if cfg.Server.PublicBaseURL != "" {
+		if _, err := ParsePublicBaseURL(cfg.Server.PublicBaseURL); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func ParsePublicBaseURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil ||
+		(u.Path != "" && u.Path != "/") || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery ||
+		strings.ContainsAny(raw, "#\"'\\") {
+		return nil, fmt.Errorf("server.public_base_url must be an HTTPS origin")
+	}
+	u.Path = ""
+	return u, nil
 }
 
 // ExampleTOML 返回一份带注释的服务端示例配置。
@@ -154,11 +196,11 @@ func ExampleTOML() string {
 bind_addr = "0.0.0.0"
 control_port = 17000
 
-panel_addr = "0.0.0.0"
+panel_addr = "127.0.0.1"
 panel_port = 8080
 # Serve the admin panel over HTTPS (PEM file paths; both must be set together).
-# panel_tls_cert = "/etc/opennofrp/panel.crt"
-# panel_tls_key = "/etc/opennofrp/panel.key"
+# panel_tls_cert = "/etc/opennofrp-server/panel.crt"
+# panel_tls_key = "/etc/opennofrp-server/panel.key"
 # Allow Prometheus to scrape /metrics with "Authorization: Bearer <token>".
 # Empty = /metrics requires a panel login session.
 # metrics_token = "change-me"
@@ -168,14 +210,16 @@ heartbeat_timeout_seconds = 90
 max_tcp_connections = 512
 # Close TCP forwards after this many seconds without traffic in either direction.
 tcp_idle_timeout_seconds = 300
-db_path = "/var/lib/opennofrp/opennofrp.db"
-client_bin_dir = "/opt/opennofrp/client-bins"
-# public_base_url = "https://frp.example.com:8080"  # used in generated install commands
+db_path = "/var/lib/opennofrp-server/opennofrp.db"
+client_bin_dir = "/opt/opennofrp-server/client-bins"
+# public_base_url = "https://frp.example.com"
+# panel_trusted_proxies = "127.0.0.1/32,::1/128" # only with a trusted HTTPS reverse proxy
+# control_host = "control.example.com" # defaults to the public_base_url host for generated configs
 
 # ACME automatic certificates for HTTPS rules (Let's Encrypt by default).
 # Certificates are only requested when acme_accept_tos = true.
 # acme_email = "admin@example.com"
-# acme_cache_dir = "/var/lib/opennofrp/acme"
+# acme_cache_dir = "/var/lib/opennofrp-server/acme"
 # acme_directory_url = ""  # empty = Let's Encrypt production
 # acme_accept_tos = false
 

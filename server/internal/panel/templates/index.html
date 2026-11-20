@@ -189,11 +189,11 @@
   {{if eq .Page "account"}}
   <section class="card" id="account">
     <h2>修改管理员密码</h2>
-    <p class="desc">为了账号安全，修改密码需要输入当前密码，且新密码长度至少 6 位。</p>
+    <p class="desc">为了账号安全，修改密码需要输入当前密码，且新密码须为 12 到 72 字节。</p>
     <form method="post" action="/admin/password" style="max-width:340px"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <div class="field">
         <label for="current-password">当前密码</label><input id="current-password" name="current_password" type="password" placeholder="输入当前密码" autocomplete="current-password" required>
-        <label for="new-password">新密码</label><input id="new-password" name="new_password" type="password" placeholder="至少 6 位" minlength="6" autocomplete="new-password" required>
+        <label for="new-password">新密码</label><input id="new-password" name="new_password" type="password" placeholder="至少 12 位" minlength="12" autocomplete="new-password" required>
       </div>
       <div class="form-actions"><button class="btn btn-primary" type="submit">保存密码</button></div>
     </form>

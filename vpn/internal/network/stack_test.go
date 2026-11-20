@@ -47,7 +47,7 @@ func (d *packetDevice) BatchSize() int           { return 1 }
 func (d *packetDevice) Close() error             { d.closes.Add(1); d.cancel(); return nil }
 func (d *packetDevice) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	p := d.link.ReadContext(d.ctx)
-	if p.IsNil() {
+	if p == nil {
 		return 0, os.ErrClosed
 	}
 	v := p.ToView()

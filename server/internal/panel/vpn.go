@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 	"opennofrp/pkg/protocol"
 	"opennofrp/pkg/tempvpn"
 	"opennofrp/pkg/updater"
+	"opennofrp/server/internal/config"
 )
 
 type vpnTarget struct {
@@ -111,13 +111,8 @@ func (p *Panel) handleVPNCreate(w http.ResponseWriter, r *http.Request) {
 		p.renderVPN(w, r, "目标机器必须在线，且 Client 已更新到支持临时 VPN 的版本。", "")
 		return
 	}
-	host := strings.TrimSpace(p.ControlHost)
-	if host == "" {
-		u, err := url.Parse(p.baseURLOf(r))
-		if err == nil {
-			host = u.Hostname()
-		}
-	}
+	base, _ := config.ParsePublicBaseURL(p.BaseURL)
+	host := p.controlHost(base)
 	if host == "" || p.ControlPort < 1 || p.ControlPort > 65535 || len(tlsutil.NormalizeFingerprint(p.Fingerprint)) != 64 {
 		p.renderVPN(w, r, "请先配置服务端对外控制地址、端口及 TLS 指纹。", "")
 		return

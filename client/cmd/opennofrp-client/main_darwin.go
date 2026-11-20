@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -84,6 +85,7 @@ func runClient() {
 	os.Setenv("OPENNOFRP_CLIENT_CONFIG", *configPath)
 
 	rules := rulesync.New(logger, *stateDir)
+	rules.StrictSourceIP = cfg.Server.StrictSourceIP
 
 	if err := os.MkdirAll(*stateDir, 0o755); err != nil {
 		logger.Warn("failed to create state dir", "dir", *stateDir, "error", err)
@@ -107,7 +109,12 @@ func runClient() {
 		client.Update = func(ctx context.Context) (updater.Result, error) {
 			return updater.SelfUpdateWithResult(ctx, "opennofrp-client")
 		}
-		client.Restart = func() error { return restartViaLaunchd(executable) }
+		client.Restart = func() error {
+			if err := restartViaLaunchd(executable); err != nil {
+				return errors.Join(err, updater.RestorePrevious(executable))
+			}
+			return nil
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

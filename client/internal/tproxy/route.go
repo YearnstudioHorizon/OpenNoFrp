@@ -3,23 +3,25 @@
 package tproxy
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DefaultRouteTable 是 OpenNoFrp 使用的策略路由表 ID。100 不在其他软件通常
 // 使用的范围内（它们往往为知名路由表使用很小的编号，或为系统保留表使用接近
 // 253-255 的很大编号），但为防在某台主机上确实发生冲突，该值仍可配置。
-const DefaultRouteTable = 100
+const DefaultRouteTable = 42141
 
 // DefaultFWMark 是每个伪造源地址连接通过 SO_MARK 携带的 fwmark，也是
 // CONNMARK save/restore 规则对和 fwmark 策略规则所依据的标记。它有意在所有
 // 规则间共享：单一的“带有此标记的任何数据包都可经 table 100 本地投递”类别，
 // 使得无论启用了多少条 preserve_source_ip 规则，路由配置都只需一条 ip rule
 // 加一张路由表。
-const DefaultFWMark = 0x1
+const DefaultFWMark = 0x40000000
 
 // EnsurePolicyRoute 配置 `ip rule` + `ip route` 组合，使带有 fwmark 标记的
 // 数据包经由回环设备本地投递；正是这一点让我们代理中伪造源 IP 的 connect()
@@ -110,7 +112,7 @@ func deleteLocalDefaultRoute(table int) error {
 	if !localDefaultRouteExists(table) {
 		return nil
 	}
-	args := []string{"route", "flush", "table", strconv.Itoa(table)}
+	args := []string{"route", "del", "local", "0.0.0.0/0", "dev", "lo", "table", strconv.Itoa(table)}
 	out, err := exec.Command("ip", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("tproxy: ip %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -125,4 +127,62 @@ func localDefaultRouteExists(table int) bool {
 	}
 	return strings.Contains(string(out), "local default dev lo") ||
 		strings.Contains(string(out), "local 0.0.0.0/0 dev lo")
+}
+
+func runIP(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ip", args...).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("ip %s: %w: %s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func routesInTable(table int, filter ...string) (string, error) {
+	args := append([]string{"-4", "route", "show", "table", strconv.Itoa(table)}, filter...)
+	out, err := runIP(args...)
+	// Linux can report ENOENT for a routing table that has never been created.
+	if err != nil && strings.Contains(err.Error(), "FIB table does not exist") {
+		return "", nil
+	}
+	return out, err
+}
+
+func checkRoutingAvailable(table int, mark uint32) error {
+	routes, err := routesInTable(table)
+	if err != nil {
+		return err
+	}
+	if routes != "" {
+		return fmt.Errorf("tproxy: routing table %d in use", table)
+	}
+	for _, selector := range [][]string{{"pref", rulePriority}, {"fwmark", fwmarkSpec(mark)}} {
+		rules, err := runIP(append([]string{"-4", "rule", "show"}, selector...)...)
+		if err != nil {
+			return err
+		}
+		if rules != "" {
+			return fmt.Errorf("tproxy: policy routing selector %v in use", selector)
+		}
+	}
+	return nil
+}
+
+func removeOwnedRule(table int, mark uint32) error {
+	rules, err := runIP(policyArgs("show", table, mark)...)
+	if err != nil || rules == "" {
+		return err
+	}
+	_, err = runIP(policyArgs("del", table, mark)...)
+	return err
+}
+
+func removeOwnedRoute(table int) error {
+	routes, err := routesInTable(table, "proto", routeProtocol, "exact", "0.0.0.0/0")
+	if err != nil || routes == "" {
+		return err
+	}
+	_, err = runIP(routeArgs("del", table)...)
+	return err
 }

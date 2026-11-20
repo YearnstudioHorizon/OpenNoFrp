@@ -12,8 +12,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"golang.org/x/net/netutil"
 	"io"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -30,6 +32,7 @@ type tlsPassRoute struct {
 	RuleID   uint32
 	ClientID string
 	Name     string
+	lifetime *routeLifetime
 	Domains  []string // 已规范化；为空表示兜底（含未发送 SNI 的连接）
 }
 
@@ -45,8 +48,23 @@ func (tl *tlsPassListener) setRoutes(routes []tlsPassRoute) {
 	sorted := append([]tlsPassRoute(nil), routes...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].RuleID < sorted[j].RuleID })
 	tl.mu.Lock()
+	old := make(map[uint32]tlsPassRoute, len(tl.routes))
+	for _, r := range tl.routes {
+		old[r.RuleID] = r
+	}
+	for i, r := range sorted {
+		if prev, ok := old[r.RuleID]; ok && r.ClientID == prev.ClientID && slices.Equal(r.Domains, prev.Domains) {
+			sorted[i].lifetime = prev.lifetime
+			delete(old, r.RuleID)
+		} else {
+			sorted[i].lifetime = newRouteLifetime()
+		}
+	}
 	tl.routes = sorted
 	tl.mu.Unlock()
+	for _, stale := range old {
+		stale.lifetime.stop()
+	}
 }
 
 // matchSNIRoute 选出与 SNI 最匹配的路由（精确 > 通配 > 兜底）。
@@ -139,6 +157,13 @@ func (m *Manager) handleTLSPassConn(tl *tlsPassListener, conn net.Conn) {
 		conn.Close()
 		return
 	}
+	tracked, err := route.lifetime.track(conn, func() {})
+	if err != nil {
+		return
+	}
+	defer tracked.Close()
+	_ = tracked.SetDeadline(time.Now().Add(m.TCPIdleTimeout))
+	conn = &activityConn{Conn: tracked, idle: m.TCPIdleTimeout}
 	var ip net.IP
 	var port uint16
 	if ta, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
@@ -163,7 +188,7 @@ func (m *Manager) handleTLSPassConn(tl *tlsPassListener, conn net.Conn) {
 		conn.Close()
 		return
 	}
-	stream, err := sess.OpenAckStream(ip, port, route.RuleID, sni, httpDialAckTimeout)
+	stream, err := sess.OpenAckStreamContext(route.lifetime.ctx, ip, port, route.RuleID, sni, httpDialAckTimeout)
 	if err != nil {
 		m.Logger.Warn("tls passthrough: backend unavailable", "rule_id", route.RuleID, "sni", sni, "error", err)
 		m.statBackendError(route.RuleID, err.Error())
@@ -198,6 +223,7 @@ func (m *Manager) openTLSPassPort(port uint16, routes []tlsPassRoute) error {
 	if err != nil {
 		return fmt.Errorf("listener: tls passthrough listen on %s: %w", addr, err)
 	}
+	ln = publicListener{Listener: netutil.LimitListener(ln, 128), global: m.tlsSockets}
 	tl := &tlsPassListener{port: port, ln: ln, done: make(chan struct{})}
 	tl.setRoutes(routes)
 	m.tlsPass[port] = tl
@@ -216,6 +242,7 @@ func (m *Manager) closeTLSPassPort(port uint16) {
 	if ok {
 		close(tl.done)
 		tl.ln.Close()
+		tl.setRoutes(nil)
 		m.Logger.Info("closed public TLS passthrough listener", "port", port)
 	}
 }

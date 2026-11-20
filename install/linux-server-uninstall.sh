@@ -4,8 +4,8 @@
 # 仅按白名单删除，依据 docs/02-risk-assessment.md 第 5 节：
 #   - 停止并禁用 opennofrp-server.service
 #   - 仅删除以下内容：/etc/systemd/system/opennofrp-server.service、
-#     /opt/opennofrp/
-#   - 默认不删除 /etc/opennofrp/server.toml（传入
+#     /opt/opennofrp-server/
+#   - 默认不删除 /etc/opennofrp-server/server.toml（传入
 #     --purge-config 可一并删除）
 #   - 默认不删除 'opennofrp' 系统用户（若确定没有其他程序依赖它，
 #     可传入 --remove-user）
@@ -23,8 +23,8 @@ for arg in "$@"; do
   esac
 done
 
-INSTALL_DIR="/opt/opennofrp"
-CONFIG_DIR="/etc/opennofrp"
+INSTALL_DIR="/opt/opennofrp-server"
+CONFIG_DIR="/etc/opennofrp-server"
 SYSTEMD_UNIT="/etc/systemd/system/opennofrp-server.service"
 SERVICE_USER="opennofrp"
 
@@ -49,13 +49,15 @@ fi
 
 if [ -d "$INSTALL_DIR" ]; then
   log "removing $INSTALL_DIR"
-  rm -rf "$INSTALL_DIR"
+  rm -rf -- "$INSTALL_DIR"
+  rm -f -- /opt/opennofrp/opennofrp-server /opt/opennofrp/opennofrp-server.bak /opt/opennofrp/opennofrp-server.service.bak
 fi
 
 if [ "$PURGE_CONFIG" -eq 1 ]; then
   if [ -d "$CONFIG_DIR" ]; then
     log "--purge-config given: removing $CONFIG_DIR"
-    rm -rf "$CONFIG_DIR"
+    rm -rf -- "$CONFIG_DIR"
+    rm -f -- /etc/opennofrp/server.toml
   fi
 else
   log "keeping $CONFIG_DIR (pass --purge-config to also remove it)"

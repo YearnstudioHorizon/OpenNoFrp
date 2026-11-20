@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"opennofrp/server/internal/listener"
 	"opennofrp/server/internal/store"
 )
 
@@ -122,9 +123,27 @@ func TestPanelCSRFAndPersistentSessions(t *testing.T) {
 		t.Errorf("session not persisted across panel restart: %d", resp.StatusCode)
 	}
 
+	if resp, _ := do(t, "POST", srv2.URL+"/logout", cookie, nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("logout without CSRF token = %d, want 403", resp.StatusCode)
+	}
 	// 退出登录后会话失效
 	do(t, "POST", srv2.URL+"/logout", cookie, url.Values{"csrf_token": {csrf}})
 	if resp, _ := do(t, "GET", srv.URL+"/", cookie, nil); resp.StatusCode != http.StatusSeeOther {
 		t.Errorf("session still valid after logout: %d", resp.StatusCode)
+	}
+}
+
+func TestBootstrapRequiresTrustedHTTPS(t *testing.T) {
+	p := &Panel{BaseURL: "https://panel.example.test"}
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/install_client.sh", nil)
+	req.RemoteAddr = "127.0.0.1:15100"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if _, ok := p.bootstrapURL(httptest.NewRecorder(), req); ok {
+		t.Fatal("forwarded scheme accepted from an unconfigured peer")
+	}
+	p.TrustedProxies, _ = listener.ParseTrustedProxies("127.0.0.1/32")
+	base, ok := p.bootstrapURL(httptest.NewRecorder(), req)
+	if !ok || base.Hostname() != "panel.example.test" {
+		t.Fatalf("trusted HTTPS request rejected or wrong origin: %v", base)
 	}
 }

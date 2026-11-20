@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,9 +63,8 @@ type Client struct {
 	controlWriteMu sync.Mutex
 	updating       atomic.Bool
 
-	seq                     uint64
-	lastObservedFingerprint string
-	connectionEstablished   bool
+	seq                   uint64
+	connectionEstablished bool
 }
 
 // Run 连接到 Server 并持续服务该连接直到 ctx 被取消，失败时以指数退避
@@ -114,22 +114,39 @@ func (c *Client) runOnce(ctx context.Context) error {
 
 	configPath := os.Getenv("OPENNOFRP_CLIENT_CONFIG")
 	if configPath == "" {
-		configPath = "/etc/opennofrp/client.toml"
+		configPath = "/etc/opennofrp-client/client.toml"
 	}
 	credsPath := config.CredentialsPath(configPath)
-	creds, _ := config.LoadCredentials(credsPath)
-
 	expectedFP := c.Cfg.Server.Fingerprint
-	if expectedFP == "" && creds != nil && creds.Fingerprint != "" {
-		expectedFP = creds.Fingerprint
+	pinPath := filepath.Join(filepath.Dir(configPath), "server-pin.toml")
+	pin := config.ServerPin{Address: addr}
+	persistPin := false
+	if expectedFP == "" {
+		saved, err := config.LoadServerPin(pinPath)
+		if err != nil {
+			return err
+		}
+		switch {
+		case saved.Address != "":
+			if saved.Address != addr {
+				return fmt.Errorf("controlconn: server address changed; configure its verified fingerprint")
+			}
+			expectedFP = saved.Fingerprint
+		default:
+			creds, err := config.LoadCredentials(credsPath)
+			if err != nil {
+				return err
+			}
+			if creds != nil {
+				expectedFP = creds.Fingerprint
+			}
+			persistPin = true
+		}
 	}
-
 	onFirstSeen := func(fp string) error {
-		c.lastObservedFingerprint = fp
-		c.Logger.Warn("首次连接服务端，已通过自签名证书建立加密信道 (TOFU)", "fingerprint", fp)
+		pin.Fingerprint = fp
 		return nil
 	}
-
 	tlsConfig := tlsutil.NewClientTLSConfig(expectedFP, onFirstSeen)
 
 	d := net.Dialer{Timeout: 15 * time.Second}
@@ -148,6 +165,16 @@ func (c *Client) runOnce(ctx context.Context) error {
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return fmt.Errorf("controlconn: TLS handshake with %s failed: %w", addr, err)
 	}
+	if persistPin {
+		if pin.Fingerprint == "" {
+			pin.Fingerprint = expectedFP
+		}
+		if err := config.SaveServerPin(pinPath, pin); err != nil {
+			return fmt.Errorf("controlconn: persist server fingerprint: %w", err)
+		}
+		c.Logger.Info("server certificate fingerprint saved", "fingerprint", pin.Fingerprint)
+	}
+
 	conn := net.Conn(tlsConn)
 
 	if err := c.handshakeOrRegister(conn); err != nil {
@@ -194,7 +221,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 func (c *Client) handshakeOrRegister(conn net.Conn) error {
 	configPath := os.Getenv("OPENNOFRP_CLIENT_CONFIG")
 	if configPath == "" {
-		configPath = "/etc/opennofrp/client.toml"
+		configPath = "/etc/opennofrp-client/client.toml"
 	}
 	credsPath := config.CredentialsPath(configPath)
 
@@ -230,7 +257,6 @@ func (c *Client) handshakeOrRegister(conn net.Conn) error {
 		newCreds := config.Credentials{
 			ClientID:     rresp.ClientID,
 			ClientSecret: rresp.ClientSecret,
-			Fingerprint:  c.lastObservedFingerprint,
 		}
 		if err := config.SaveCredentials(credsPath, newCreds); err != nil {
 			return err

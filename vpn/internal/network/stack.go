@@ -97,7 +97,7 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial, d
 		if err != nil {
 			return
 		}
-		conn := gonet.NewUDPConn(s, &q, endpoint)
+		conn := gonet.NewUDPConn(&q, endpoint)
 		select {
 		case flows <- struct{}{}:
 		default:
@@ -114,7 +114,7 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial, d
 			tempvpn.RelayDatagrams(ctx, conn, remote)
 		}()
 	})
-	s.SetTransportProtocolHandler(udp.ProtocolNumber, func(id stack.TransportEndpointID, packet stack.PacketBufferPtr) bool {
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, func(id stack.TransportEndpointID, packet *stack.PacketBuffer) bool {
 		// The pinned gVisor UDP forwarder retains one packet reference but has
 		// no request-release API. CreateEndpoint consumes it synchronously;
 		// balance that reference when the forwarder returns.
@@ -131,7 +131,7 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial, d
 		var txBuf []byte
 		for {
 			packet := ep.ReadContext(ctx)
-			if packet.IsNil() {
+			if packet == nil {
 				errors <- ctx.Err()
 				return
 			}

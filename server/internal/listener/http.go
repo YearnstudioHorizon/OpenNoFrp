@@ -20,10 +20,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"golang.org/x/net/netutil"
 	"html/template"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,7 +67,8 @@ type httpRoute struct {
 	NotFoundPage string
 
 	// cert 是 custom 模式下已解析的证书（解析失败或非 custom 模式为 nil）。
-	cert *tls.Certificate
+	cert     *tls.Certificate
+	lifetime *routeLifetime
 }
 
 type httpListener struct {
@@ -91,8 +94,26 @@ func (hl *httpListener) setRoutes(routes []httpRoute) {
 	sorted := append([]httpRoute(nil), routes...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].RuleID < sorted[j].RuleID })
 	hl.mu.Lock()
+	old := make(map[uint32]httpRoute, len(hl.routes))
+	for _, r := range hl.routes {
+		old[r.RuleID] = r
+	}
+	for i := range sorted {
+		previous, ok := old[sorted[i].RuleID]
+		lifetime := previous.lifetime
+		previous.lifetime = nil
+		if ok && reflect.DeepEqual(previous, sorted[i]) {
+			sorted[i].lifetime = lifetime
+			delete(old, sorted[i].RuleID)
+		} else {
+			sorted[i].lifetime = newRouteLifetime()
+		}
+	}
 	hl.routes = sorted
 	hl.mu.Unlock()
+	for _, stale := range old {
+		stale.lifetime.stop()
+	}
 }
 
 func (hl *httpListener) ruleIDs() []uint32 {
@@ -179,9 +200,11 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		// 合成主机名（见 backendPoolKey），http.Transport 按该键分池，因此同一访问者
 		// 对同一规则的请求可复用已拨通的 yamux 流（Client 侧以访问者 IP 伪装拨号的
 		// 后端连接也随之复用），而不同访问者/规则/会话之间绝不会混用连接。
+		MaxIdleConns:          32,
 		MaxIdleConnsPerHost:   4,
+		MaxConnsPerHost:       16,
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 0,
+		ResponseHeaderTimeout: 30 * time.Second,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			route, _ := ctx.Value(ctxKeyRoute).(httpRoute)
 			sess, _ := ctx.Value(ctxKeySession).(*session.Session)
@@ -194,11 +217,27 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 			if remote != nil {
 				ip, port = remote.IP, uint16(remote.Port)
 			}
-			c, err := sess.OpenHTTPStream(ip, port, route.RuleID, httpDialAckTimeout)
+			if route.lifetime.ctx.Err() != nil {
+				return nil, context.Canceled
+			}
+			select {
+			case m.httpBackends <- struct{}{}:
+			default:
+				return nil, session.ErrBackendUnavailable
+			}
+			release := func() { <-m.httpBackends }
+			c, err := sess.OpenAckStreamContext(route.lifetime.ctx, ip, port, route.RuleID, "", httpDialAckTimeout)
+			if err != nil {
+				release()
+				return nil, err
+			}
+			_ = c.SetDeadline(time.Now().Add(m.TCPIdleTimeout))
+			idle := &activityConn{Conn: c, idle: m.TCPIdleTimeout}
+			tracked, err := route.lifetime.track(idle, release)
 			if err != nil {
 				return nil, err
 			}
-			return m.guardFor(route.RuleID).wrapConn(m.countConn(route.RuleID, c, true)), nil
+			return m.guardFor(route.RuleID).wrapConn(m.countConn(route.RuleID, tracked, true)), nil
 		},
 	}
 
@@ -211,7 +250,7 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 			sess, _ := pr.In.Context().Value(ctxKeySession).(*session.Session)
 			remote, _ := pr.In.Context().Value(ctxKeyRemote).(*net.TCPAddr)
 			// URL.Host 只用作连接池键（DialContext 忽略地址），真正的 Host 头见下。
-			pr.Out.URL.Host = backendPoolKey(route.RuleID, remote, sess)
+			pr.Out.URL.Host = fmt.Sprintf("%p.%s", route.lifetime, backendPoolKey(route.RuleID, remote, sess))
 			pr.Out.Host = pr.In.Host // 保留原始 Host，后端可据此做虚拟主机
 			realIP, _ := pr.In.Context().Value(ctxKeyRealIP).(net.IP)
 			// 按规则配置的 IP 来源优先级改写 X-Real-IP / X-Forwarded-* / Forwarded 等头
@@ -268,6 +307,10 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 			serveNotFound(w, r.Host, notFoundPage)
 			return
 		}
+		if route.lifetime.ctx.Err() != nil {
+			serveUnavailable(w, route)
+			return
+		}
 		// 按规则配置的优先级提取真实客户端 IP；该 IP 用于白名单判断、写入转发
 		// 请求头，并写入 StreamMetadata，使 Client 以真实 IP 为源地址伪装拨号后端。
 		realIP, _ := extractClientIP(r, route)
@@ -294,9 +337,19 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 			http.Error(w, "429 too many requests", http.StatusTooManyRequests)
 			return
 		}
-		if !checkBasicAuth(r, route.BasicAuth) {
-			serveAuthRequired(w, route)
-			return
+		if len(route.BasicAuth) != 0 {
+			select {
+			case m.httpAuth <- struct{}{}:
+			default:
+				http.Error(w, "too many authentication requests", http.StatusTooManyRequests)
+				return
+			}
+			ok := checkBasicAuth(r, route.BasicAuth)
+			<-m.httpAuth
+			if !ok {
+				serveAuthRequired(w, route)
+				return
+			}
 		}
 		sess := m.Lookup(route.ClientID)
 		if sess == nil {
@@ -324,7 +377,16 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		} else if realIP != nil {
 			ctx = context.WithValue(ctx, ctxKeyRemote, &net.TCPAddr{IP: realIP})
 		}
-		proxy.ServeHTTP(w, r.WithContext(ctx))
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		controller := http.NewResponseController(w)
+		stop := context.AfterFunc(route.lifetime.ctx, func() {
+			cancel()
+			_ = controller.SetWriteDeadline(time.Now())
+		})
+		defer stop()
+		_ = controller.SetWriteDeadline(time.Now().Add(m.TCPIdleTimeout))
+		proxy.ServeHTTP(trackedResponse{w, route.lifetime, m.TCPIdleTimeout}, r.WithContext(ctx))
 	})
 }
 
@@ -412,13 +474,16 @@ func (m *Manager) openHTTPPort(port uint16, routes []httpRoute) error {
 	}
 	hl := &httpListener{port: port, tls: wantTLS}
 	hl.setRoutes(routes)
+	ln = publicListener{Listener: netutil.LimitListener(ln, 128), global: m.httpSockets}
 	if wantTLS {
 		ln = tls.NewListener(ln, m.tlsConfigFor(hl))
 	}
 	hl.ln = ln
 	hl.srv = &http.Server{
 		Handler:           m.newHTTPHandler(hl),
-		ReadHeaderTimeout: 30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       m.TCPIdleTimeout,
+		MaxHeaderBytes:    64 << 10,
 		IdleTimeout:       120 * time.Second,
 		// 禁用 HTTP/2 自动协商（tls.Config.NextProtos 仅含 http/1.1），保证 WebSocket 可用。
 		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
@@ -445,6 +510,7 @@ func (m *Manager) closeHTTPPort(port uint16) {
 	}
 	m.mu.Unlock()
 	if ok {
+		hl.setRoutes(nil)
 		hl.srv.Close()
 		m.Logger.Info("closed public HTTP listener", "port", port)
 	}
