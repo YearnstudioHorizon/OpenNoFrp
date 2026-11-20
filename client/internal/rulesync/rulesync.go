@@ -55,7 +55,7 @@ func (r *Reconciler) Apply(rules []protocol.Rule) {
 	for _, rule := range rules {
 		r.rules[uint32(rule.ID)] = rule
 		if rule.PreserveSourceIP && !sourceIPSupported() {
-			r.Logger.Warn("rule requests source IP preservation, unsupported on this platform; plain forwarding will be used", "rule", rule.Name)
+			r.Logger.Warn("rule requests source IP preservation, unavailable on this platform", "rule", rule.Name, "strict", r.StrictSourceIP)
 		}
 	}
 	r.Logger.Info("rules snapshot applied", "count", len(rules))

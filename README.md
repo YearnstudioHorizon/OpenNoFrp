@@ -57,10 +57,10 @@ Server 和内网 Client 都需使用包含此功能的版本。
 使用支持发布证明的 GitHub CLI 验证更新。命令会在替换前启动新二进制检查版本，并留下同目录的 `.bak` 供回滚。通过安装脚本配置并已运行的 Linux systemd 服务会自动重启并检查健康状态，失败时恢复旧二进制；其他安装方式手动重启对应服务。
 ```bash
 # 服务端一键自更新
-sudo opennofrp-server update
+sudo /opt/opennofrp-server/opennofrp-server update
 
 # 客户端一键自更新
-sudo opennofrp-client update
+sudo /opt/opennofrp-client/opennofrp-client update
 ```
 Web 管理面板首页也集成了“检查更新”功能，可实时获取 GitHub 最新发行公告。
 

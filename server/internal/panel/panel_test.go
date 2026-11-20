@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"opennofrp/server/internal/listener"
 	"opennofrp/server/internal/store"
@@ -145,5 +147,33 @@ func TestBootstrapRequiresTrustedHTTPS(t *testing.T) {
 	base, ok := p.bootstrapURL(httptest.NewRecorder(), req)
 	if !ok || base.Hostname() != "panel.example.test" {
 		t.Fatalf("trusted HTTPS request rejected or wrong origin: %v", base)
+	}
+}
+
+func TestClientBootstrapScript(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "onboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p := New(st, slog.Default(), nil, "https://panel.example.test", "", 17000, "SHA256"+strings.Repeat(":AB", 32), "")
+	token, err := st.CreateRegisterToken(context.Background(), "test", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "https://panel.example.test/install_client.sh?token="+token.Token, nil)
+	response := httptest.NewRecorder()
+	p.Handler().ServeHTTP(response, req)
+	script := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(script, "SERVER_HOST='panel.example.test'") ||
+		!strings.Contains(script, "gh attestation verify") {
+		t.Fatal("bootstrap script missed configured host or required release verification")
+	}
+	if bash, err := exec.LookPath("bash"); err == nil {
+		cmd := exec.Command(bash, "-n")
+		cmd.Stdin = strings.NewReader(script)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bootstrap script has invalid shell syntax: %v: %s", err, output)
+		}
 	}
 }
