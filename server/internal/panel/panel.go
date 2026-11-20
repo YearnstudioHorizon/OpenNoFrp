@@ -584,7 +584,8 @@ func (p *Panel) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 	tok, err := p.Store.CreateRegisterToken(r.Context(), r.FormValue("label"), time.Duration(ttlMin)*time.Minute)
 	if err != nil {
-		p.redirectErr(w, r, "/onboard?err="+url.QueryEscape(err.Error()))
+		p.Logger.Error("panel: operation failed", "error", err)
+		p.redirectErr(w, r, "/onboard?err="+url.QueryEscape("internal error"))
 		return
 	}
 	cmd := bootstrapCommand(base.String() + "/install_client.sh?token=" + tok.Token)
@@ -1028,7 +1029,8 @@ func (p *Panel) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := p.Store.CreateRule(r.Context(), rule); err != nil {
-		p.redirectErr(w, r, "/clients/"+clientID+"/rules/new?err="+url.QueryEscape(err.Error()))
+		p.Logger.Error("panel: operation failed", "error", err)
+		p.redirectErr(w, r, "/clients/"+clientID+"/rules/new?err="+url.QueryEscape("internal error"))
 		return
 	}
 	p.rulesChanged()
@@ -1054,7 +1056,8 @@ func (p *Panel) handleEditRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.Store.UpdateRule(r.Context(), rule); err != nil {
-		p.redirectErr(w, r, fmt.Sprintf("/clients/%s/rules/%d/edit?err=%s", existing.ClientID, id64, url.QueryEscape(err.Error())))
+		p.Logger.Error("panel: operation failed", "error", err)
+		p.redirectErr(w, r, fmt.Sprintf("/clients/%s/rules/%d/edit?err=%s", existing.ClientID, id64, url.QueryEscape("internal error")))
 		return
 	}
 	p.rulesChanged()

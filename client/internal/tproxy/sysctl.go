@@ -12,6 +12,12 @@ import (
 // sysctlPath 将点分隔的 sysctl 名称（例如 "net.ipv4.conf.lo.rp_filter"）
 // 映射为对应的 /proc/sys 文件路径。
 func sysctlPath(name string) string {
+	const prefix = "net.ipv4.conf."
+	if rest, ok := strings.CutPrefix(name, prefix); ok {
+		if i := strings.LastIndexByte(rest, '.'); i > 0 {
+			return "/proc/sys/net/ipv4/conf/" + rest[:i] + "/" + rest[i+1:]
+		}
+	}
 	return "/proc/sys/" + strings.ReplaceAll(name, ".", "/")
 }
 

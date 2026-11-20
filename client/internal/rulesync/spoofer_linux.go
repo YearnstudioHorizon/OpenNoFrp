@@ -51,7 +51,8 @@ func (r *Reconciler) dialPreservingSource(ctx context.Context, rule protocol.Rul
 
 	case envcheck.OwnerDockerBridgeNetwork:
 		cns := netnsworker.ContainerNetns{PID: owner.PID}
-		if err := r.ensureNetnsReady(cns); err != nil {
+		namespace, err := r.prepareNetns(cns)
+		if err != nil {
 			r.Logger.Warn("container netns setup failed, falling back to plain forwarding",
 				"rule", rule.Name, "container_pid", owner.PID, "error", err)
 			return nil, nil
@@ -70,28 +71,14 @@ func (r *Reconciler) dialPreservingSource(ctx context.Context, rule protocol.Rul
 		if owner.TargetPort != 0 {
 			containerPort = owner.TargetPort
 		}
-		upstreamCh := make(chan net.Conn, 1)
-		errCh := make(chan error, 1)
-		go func() {
-			if err := cns.Enter(); err != nil {
-				errCh <- fmt.Errorf("enter container netns: %w", err)
-				return
-			}
+		var upstream net.Conn
+		err = netnsworker.RunPath(namespace, func() error {
 			dialer := tproxy.SpoofedDialer{FWMark: sharedFWMark}
-			upstream, err := dialer.DialSpoofed(ctx, meta.ClientAddr, containerIP, containerPort)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			upstreamCh <- upstream
-		}()
-		select {
-		case err := <-errCh:
-			r.Logger.Warn("container-netns spoofed dial failed, dropping", "rule", rule.Name, "error", err)
-			return nil, err
-		case upstream := <-upstreamCh:
-			return upstream, nil
-		}
+			conn, err := dialer.DialSpoofed(ctx, meta.ClientAddr, containerIP, containerPort)
+			upstream = conn
+			return err
+		})
+		return upstream, err
 
 	default:
 		r.Logger.Warn("unknown port owner kind, falling back to plain forwarding", "rule", rule.Name, "kind", owner.Kind.String())
@@ -125,43 +112,44 @@ func (r *Reconciler) ensureHostTPROXYReady() error {
 	return nil
 }
 
-// ensureNetnsReady 在容器的 netns 内应用 sysctls + 策略路由，每个容器 PID
-// 只执行一次。通过 RunInNamespace 执行，确保写入落在容器自身的 eth0/lo/all 条目上。
-func (r *Reconciler) ensureNetnsReady(cns netnsworker.ContainerNetns) error {
+// prepareNetns returns the pinned namespace for setup, dialing and rollback.
+func (r *Reconciler) prepareNetns(cns netnsworker.ContainerNetns) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.stopping {
-		return net.ErrClosed
+		return "", net.ErrClosed
 	}
 
 	source, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", cns.PID))
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer source.Close()
 	var stat unix.Stat_t
 	if err := unix.Fstat(int(source.Fd()), &stat); err != nil {
-		return err
+		return "", err
 	}
 	id := fmt.Sprintf("%d-%d", stat.Dev, stat.Ino)
-	if r.preparedNetns[id] {
-		return nil
-	}
-
 	dir := filepath.Join(r.StateDir, "namespaces", id)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
 	path := filepath.Join(dir, "netns")
+	if r.preparedNetns[id] {
+		return path, nil
+	}
+	if len(r.preparedNetns) >= 128 {
+		return "", fmt.Errorf("too many retained container namespaces")
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
 	anchor, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		return err
+		return "", err
 	}
 	anchor.Close()
 	// The bind mount keeps the exact namespace recoverable after a PID change
 	// and after an unexpected client exit.
 	if err := unix.Mount(fmt.Sprintf("/proc/self/fd/%d", source.Fd()), path, "", unix.MS_BIND, ""); err != nil {
-		return errors.Join(err, os.Remove(path))
+		return "", errors.Join(err, os.Remove(path))
 	}
 	mgr := tproxy.Manager{StateDir: dir}
 	if err := netnsworker.RunPath(path, func() error {
@@ -171,11 +159,11 @@ func (r *Reconciler) ensureNetnsReady(cns netnsworker.ContainerNetns) error {
 		}
 		return mgr.SetupRuntime(iface, tproxy.DefaultRouteTable, sharedFWMark)
 	}); err != nil {
-		return errors.Join(err, teardownNamespace(dir))
+		return "", errors.Join(err, teardownNamespace(dir))
 	}
 	r.preparedNetns[id] = true
 	r.Logger.Info("container network namespace prepared", "pid", cns.PID)
-	return nil
+	return path, nil
 }
 
 func teardownNamespace(dir string) error {

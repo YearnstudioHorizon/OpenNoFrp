@@ -48,7 +48,8 @@ func (p *Panel) handleCreateMigrationToken(w http.ResponseWriter, r *http.Reques
 	}
 	tok, err := p.Store.CreateMigrationToken(r.Context(), migrationTokenTTL)
 	if err != nil {
-		p.redirectErr(w, r, "/account?err="+url.QueryEscape(err.Error()))
+		p.Logger.Error("panel: operation failed", "error", err)
+		p.redirectErr(w, r, "/account?err="+url.QueryEscape("internal error"))
 		return
 	}
 	cmd := bootstrapCommand(base.String() + "/migrate.sh?token=" + tok)

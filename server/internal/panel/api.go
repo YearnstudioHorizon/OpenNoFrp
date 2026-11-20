@@ -412,7 +412,8 @@ func (p *Panel) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := apiTokenPrefix + randomHex(24)
 	if _, err := p.Store.CreateAPIToken(r.Context(), name, hashSessionToken(tok), tok[:len(apiTokenPrefix)+6], r.FormValue("read_only") == "1"); err != nil {
-		p.redirectErr(w, r, "/api-tokens?err="+url.QueryEscape(err.Error()))
+		p.Logger.Error("panel: operation failed", "error", err)
+		p.redirectErr(w, r, "/api-tokens?err="+url.QueryEscape("internal error"))
 		return
 	}
 	data := p.workspaceData(r, "api-tokens")
@@ -427,7 +428,8 @@ func (p *Panel) handleDeleteAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.Store.DeleteAPIToken(r.Context(), id); err != nil {
-		p.redirectErr(w, r, "/api-tokens?err="+url.QueryEscape(err.Error()))
+		p.Logger.Error("panel: operation failed", "error", err)
+		p.redirectErr(w, r, "/api-tokens?err="+url.QueryEscape("internal error"))
 		return
 	}
 	http.Redirect(w, r, "/api-tokens?ok=api+token+revoked", http.StatusSeeOther)

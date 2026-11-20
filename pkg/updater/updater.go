@@ -121,8 +121,22 @@ type Result struct {
 
 // SelfUpdate 执行当前二进制文件的在线一键更新。
 func SelfUpdate(ctx context.Context, componentName string) error {
-	_, err := SelfUpdateWithResult(ctx, componentName)
-	return err
+	path, err := executablePath()
+	if err != nil {
+		return err
+	}
+	managed := runtime.GOOS == "linux" &&
+		path == filepath.Join("/opt", componentName, componentName) &&
+		exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", componentName+".service").Run() == nil
+	result, err := SelfUpdateWithResult(ctx, componentName)
+	if err != nil || !result.Updated {
+		return err
+	}
+	if managed {
+		return restartInstalledService(ctx, componentName, path)
+	}
+	fmt.Printf("[OpenNoFrp] Restart %s to use the new executable. A backup is available at %s.bak.\n", componentName, path)
+	return nil
 }
 
 // SelfUpdateWithResult reports whether a new executable was actually installed.
@@ -183,14 +197,9 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 
 	const mirrorPrefix = "https://mirror.yearnstudio.cn/"
 
-	// 定位当前正在运行的程序真实路径
-	execPath, err := os.Executable()
+	execPath, err := executablePath()
 	if err != nil {
-		return fmt.Errorf("获取当前程序路径失败: %w", err)
-	}
-	execPath, err = filepath.EvalSymlinks(execPath)
-	if err != nil {
-		return fmt.Errorf("解析符号链接失败: %w", err)
+		return err
 	}
 
 	// 创建临时文件写入
@@ -263,12 +272,6 @@ func selfUpdate(ctx context.Context, componentName string, installed func(string
 
 	fmt.Printf("[OpenNoFrp] 恭喜！已成功将 %s 更新至 %s\n", componentName, latestTag)
 	installed(latestTag)
-	fmt.Printf("[OpenNoFrp] 请执行以下命令重启对应服务以生效：\n")
-	if componentName == "opennofrp-server" {
-		fmt.Printf("  sudo systemctl restart opennofrp-server\n")
-	} else {
-		fmt.Printf("  sudo systemctl restart opennofrp-client\n")
-	}
 
 	return nil
 }

@@ -380,11 +380,17 @@ func (m *Manager) newHTTPHandler(hl *httpListener) http.Handler {
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		controller := http.NewResponseController(w)
+		revoked := make(chan struct{})
 		stop := context.AfterFunc(route.lifetime.ctx, func() {
+			defer close(revoked)
 			cancel()
 			_ = controller.SetWriteDeadline(time.Now())
 		})
-		defer stop()
+		defer func() {
+			if !stop() {
+				<-revoked
+			}
+		}()
 		_ = controller.SetWriteDeadline(time.Now().Add(m.TCPIdleTimeout))
 		proxy.ServeHTTP(trackedResponse{w, route.lifetime, m.TCPIdleTimeout}, r.WithContext(ctx))
 	})

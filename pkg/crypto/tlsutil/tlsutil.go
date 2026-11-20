@@ -178,6 +178,13 @@ func NewClientTLSConfig(expectedFingerprint string, onFirstSeenFingerprint func(
 		InsecureSkipVerify: true, // 跳过系统 CA 校验，改由我们严格校验公钥/证书 SHA-256 指纹
 		MinVersion:         tls.VersionTLS12,
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if expectedFingerprint != "" {
+				decoded, err := hex.DecodeString(expectedNorm)
+				if err != nil || len(decoded) != sha256.Size {
+					return errors.New("tlsutil: invalid configured SHA-256 certificate fingerprint")
+				}
+			}
+
 			if len(rawCerts) == 0 {
 				return errors.New("tlsutil: 服务端未提供任何证书")
 			}
