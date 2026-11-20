@@ -54,6 +54,11 @@ jobs:
       - name: go test
         run: go test -race -count=1 ./...
 
+      - name: Linux network rollback in an isolated namespace
+        run: |
+          go test -c -o "$RUNNER_TEMP/tproxy-test" ./client/internal/tproxy
+          sudo env OPENNOFRP_TEST_NETNS=1 unshare --net "$RUNNER_TEMP/tproxy-test" -test.run '^TestRuntimeSetupAndRecoveryInNamespace$' -test.v
+
   windows-vpn:
     name: Windows VPN (${{ matrix.goarch }})
     runs-on: ubuntu-latest
