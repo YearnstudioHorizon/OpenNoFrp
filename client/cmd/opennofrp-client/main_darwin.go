@@ -1,9 +1,8 @@
 //go:build darwin
 
 // Command opennofrp-client 是 OpenNoFrp 本地 Client 的入口程序（macOS 版）。
-// 与 Linux 版不同：macOS 版不支持基于 TPROXY 的源 IP 保留（开启该选项的规则
-// 自动降级为普通转发），也没有 envcheck / tproxy-teardown 子命令；服务由
-// launchd（而非 systemd）管理，默认目录遵循 /Library/Application Support 布局。
+// macOS 使用 utun 和 PF 实现源 IP 保留。服务由 launchd 管理，
+// 默认目录遵循 /Library/Application Support 布局。
 package main
 
 import (
@@ -84,6 +83,12 @@ func runClient() {
 	os.Setenv("OPENNOFRP_CLIENT_CONFIG", *configPath)
 
 	rules := rulesync.New(logger, *stateDir)
+	closeRules := func() {
+		if err := rules.Close(); err != nil {
+			logger.Warn("failed to clean up macOS source IP forwarding", "error", err)
+		}
+	}
+	defer closeRules()
 
 	if err := os.MkdirAll(*stateDir, 0o755); err != nil {
 		logger.Warn("failed to create state dir", "dir", *stateDir, "error", err)
@@ -107,7 +112,10 @@ func runClient() {
 		client.Update = func(ctx context.Context) (updater.Result, error) {
 			return updater.SelfUpdateWithResult(ctx, "opennofrp-client")
 		}
-		client.Restart = func() error { return restartViaLaunchd(executable) }
+		client.Restart = func() error {
+			closeRules()
+			return restartViaLaunchd(executable)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -97,7 +97,7 @@ jobs:
           go build -ldflags="${LDFLAGS}" -o "dist/${VPN_BIN}" ./vpn/cmd/opennofrp-vpn
           cp vpn/internal/network/assets/WINTUN-LICENSE.txt dist/WINTUN-LICENSE.txt
 
-          # 2. 编译 Client (Linux 使用 TPROXY/Netns 源 IP 保留；macOS 为普通转发版)
+          # 2. 编译 Client (Linux 使用 TPROXY/Netns，macOS 使用 utun/PF 保留 IPv4 来源地址)
           if [ "${{ matrix.build_client }}" = "true" ]; then
             CLIENT_BIN="opennofrp-client-${{ matrix.goos }}-${{ matrix.goarch }}"
             echo "Building ${CLIENT_BIN}..."
