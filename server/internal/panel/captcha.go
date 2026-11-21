@@ -27,6 +27,7 @@ const captchaCookie = "onfr_captcha"
 type captchaChallenge struct {
 	Answer  string
 	Expires time.Time
+	IP      string
 }
 
 // Only public settings may reach the login page.
@@ -59,8 +60,8 @@ func validateCaptchaSettings(s store.CaptchaSettings) error {
 		return nil
 	case "fcaptcha":
 		u, err := url.Parse(s.FCaptchaURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			return errors.New("fCaptcha 实例地址必须是 HTTP 或 HTTPS 地址，不能包含用户名、查询参数或片段")
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return errors.New("fCaptcha 实例地址必须是 HTTPS 地址，不能包含用户名、查询参数或片段")
 		}
 		if s.FCaptchaSiteKey == "" || s.FCaptchaSecret == "" {
 			return errors.New("请填写 fCaptcha Site Key 和 Secret")
@@ -135,7 +136,11 @@ func (p *Panel) verifyCaptcha(r *http.Request) error {
 		}
 		p.mu.Lock()
 		challenge, ok := p.captchaChallenges[cookie.Value]
-		delete(p.captchaChallenges, cookie.Value)
+		if ok && challenge.IP == p.requestIP(r) {
+			delete(p.captchaChallenges, cookie.Value)
+		} else {
+			ok = false
+		}
 		p.mu.Unlock()
 		if !ok || !time.Now().Before(challenge.Expires) || subtle.ConstantTimeCompare([]byte(challenge.Answer), []byte(strings.TrimSpace(r.FormValue("captcha_answer")))) != 1 {
 			return errors.New("invalid captcha")
@@ -264,6 +269,14 @@ var captchaDigits = []string{
 }
 
 func (p *Panel) handleCaptchaImage(w http.ResponseWriter, r *http.Request) {
+	select {
+	case p.captchaSlots <- struct{}{}:
+		defer func() { <-p.captchaSlots }()
+	default:
+		http.Error(w, "请稍后重试", http.StatusTooManyRequests)
+		return
+	}
+	ip := p.requestIP(r)
 	w.Header().Set("Cache-Control", "no-store")
 	s, err := p.Store.CaptchaSettings(r.Context())
 	if err != nil {
@@ -276,15 +289,18 @@ func (p *Panel) handleCaptchaImage(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	p.mu.Lock()
+	if cookie, err := r.Cookie(captchaCookie); err == nil && p.captchaChallenges[cookie.Value].IP == ip {
+		delete(p.captchaChallenges, cookie.Value)
+	}
+	count := 0
 	for key, value := range p.captchaChallenges {
 		if !now.Before(value.Expires) {
 			delete(p.captchaChallenges, key)
+		} else if value.IP == ip {
+			count++
 		}
 	}
-	if cookie, err := r.Cookie(captchaCookie); err == nil {
-		delete(p.captchaChallenges, cookie.Value)
-	}
-	if len(p.captchaChallenges) >= 2048 {
+	if count >= 4 || len(p.captchaChallenges) >= 2048 {
 		p.mu.Unlock()
 		http.Error(w, "请稍后重试", http.StatusTooManyRequests)
 		return
@@ -294,9 +310,9 @@ func (p *Panel) handleCaptchaImage(w http.ResponseWriter, r *http.Request) {
 		answer += string('0' + byte(captchaRand(10)))
 	}
 	id := randomHex(32)
-	p.captchaChallenges[id] = captchaChallenge{answer, now.Add(3 * time.Minute)}
+	p.captchaChallenges[id] = captchaChallenge{answer, now.Add(3 * time.Minute), ip}
 	p.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: captchaCookie, Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, MaxAge: 180})
+	http.SetCookie(w, &http.Cookie{Name: captchaCookie, Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: p.secureRequest(r), MaxAge: 180})
 	img := image.NewRGBA(image.Rect(0, 0, 200, 64))
 	for y := 0; y < 64; y++ {
 		for x := 0; x < 200; x++ {

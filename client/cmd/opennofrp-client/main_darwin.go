@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -83,6 +84,7 @@ func runClient() {
 	os.Setenv("OPENNOFRP_CLIENT_CONFIG", *configPath)
 
 	rules := rulesync.New(logger, *stateDir)
+	rules.StrictSourceIP = cfg.Server.StrictSourceIP
 	closeRules := func() {
 		if err := rules.Close(); err != nil {
 			logger.Warn("failed to clean up macOS source IP forwarding", "error", err)
@@ -114,7 +116,10 @@ func runClient() {
 		}
 		client.Restart = func() error {
 			closeRules()
-			return restartViaLaunchd(executable)
+			if err := restartViaLaunchd(executable); err != nil {
+				return errors.Join(err, updater.RestorePrevious(executable))
+			}
+			return nil
 		}
 	}
 

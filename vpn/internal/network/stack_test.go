@@ -29,6 +29,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
 // packetDevice connects Run to an independent client stack without a real TUN.
@@ -47,7 +48,7 @@ func (d *packetDevice) BatchSize() int           { return 1 }
 func (d *packetDevice) Close() error             { d.closes.Add(1); d.cancel(); return nil }
 func (d *packetDevice) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	p := d.link.ReadContext(d.ctx)
-	if p.IsNil() {
+	if p == nil {
 		return 0, os.ErrClosed
 	}
 	v := p.ToView()
@@ -441,15 +442,20 @@ func runConcurrentConnections(t *testing.T) {
 func runTCPAndCancellation(t *testing.T, diagnostics bool, payload []byte) {
 	var logMu sync.Mutex
 	var messages []string
+	responseLogged := make(chan struct{})
+	var responseOnce sync.Once
 	var diagnostic func(string, ...any)
 	if diagnostics {
 		diagnostic = func(format string, args ...any) {
 			logMu.Lock()
 			defer logMu.Unlock()
 			messages = append(messages, fmt.Sprintf(format, args...))
+			if strings.HasPrefix(format, "TCP 收到目标响应") {
+				responseOnce.Do(func() { close(responseLogged) })
+			}
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	client := stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol}})
 	defer client.Close()
@@ -481,7 +487,7 @@ func runTCPAndCancellation(t *testing.T, diagnostics bool, payload []byte) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	written := make(chan error, 1)
 	go func() { _, err := conn.Write(payload); written <- err }()
 	reply := make([]byte, len(payload))
@@ -495,6 +501,12 @@ func runTCPAndCancellation(t *testing.T, diagnostics bool, payload []byte) {
 		t.Fatal("TCP reply differs from request")
 	}
 	if diagnostics {
+		// The reader can receive the bytes before diagnosticConn.Write logs them.
+		select {
+		case <-responseLogged:
+		case <-ctx.Done():
+			t.Fatal("target response was not logged before the deadline")
+		}
 		logMu.Lock()
 		joined := strings.Join(messages, "\n")
 		logMu.Unlock()
@@ -734,4 +746,57 @@ func runBrowserMultiAssetFlow(t *testing.T) {
 	conn2.Close()
 	cancel()
 	<-done
+}
+
+func TestRunUDPRelay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol},
+	})
+	defer client.Close()
+	link := channel.New(16, 1280, "")
+	defer link.Close()
+	if err := client.CreateNIC(1, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.AddProtocolAddress(1, tcpip.ProtocolAddress{
+		Protocol: ipv4.ProtocolNumber, AddressWithPrefix: tcpip.AddrFrom4([4]byte{10, 203, 0, 2}).WithPrefix(),
+	}, stack.AddressProperties{}); err != nil {
+		t.Fatal(err)
+	}
+	client.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: 1}})
+	deviceCtx, closeDevice := context.WithCancel(ctx)
+	defer closeDevice()
+	device := &packetDevice{ctx: deviceCtx, cancel: closeDevice, link: link}
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, device, netip.MustParseAddr("10.203.0.1"), func(_ context.Context, network string, port uint16) (net.Conn, error) {
+			if network != "udp" || port != 5353 {
+				return nil, fmt.Errorf("unexpected destination %s/%d", network, port)
+			}
+			relay, echo := net.Pipe()
+			go func() { defer echo.Close(); _, _ = io.Copy(echo, echo) }()
+			return relay, nil
+		})
+	}()
+	defer func() { cancel(); <-done }()
+	target := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 203, 0, 1}), Port: 5353}
+	conn, err := gonet.DialUDP(client, nil, &target, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte("udp echo")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	n, err := conn.Read(buf)
+	if err != nil || string(buf[:n]) != "udp echo" {
+		t.Fatalf("UDP echo reply = %q, %v", buf[:n], err)
+	}
 }

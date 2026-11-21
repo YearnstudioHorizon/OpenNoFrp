@@ -4,6 +4,7 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -13,9 +14,9 @@ jobs:
     name: gofmt / vet / test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -28,6 +29,17 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
+
+      - name: Shell syntax
+        run: |
+          for script in install/*.sh pkg/updater/release.sh; do bash -n "$script"; done
+
+      - name: Dependency integrity and vulnerability scan
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go mod verify
+          go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
 
       - name: go build
         env:
@@ -42,6 +54,11 @@ jobs:
       - name: go test
         run: go test -race -count=1 ./...
 
+      - name: Linux network rollback in an isolated namespace
+        run: |
+          go test -c -o "$RUNNER_TEMP/tproxy-test" ./client/internal/tproxy
+          sudo env OPENNOFRP_TEST_NETNS=1 unshare --net "$RUNNER_TEMP/tproxy-test" -test.run '^TestRuntimeSetupAndRecoveryInNamespace$' -test.v
+
   windows-vpn:
     name: Windows VPN (${{ matrix.goarch }})
     runs-on: ubuntu-latest
@@ -49,8 +66,8 @@ jobs:
       matrix:
         goarch: [amd64, arm64, '386']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -77,9 +94,9 @@ jobs:
           - goos: darwin
             goarch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true

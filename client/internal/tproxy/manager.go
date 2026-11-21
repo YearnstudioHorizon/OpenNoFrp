@@ -4,203 +4,240 @@ package tproxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
-// State 是 OpenNoFrp 对本机网络栈所做全部改动的磁盘记录。每次 Setup 调用
-// 成功后都会写入它，并由 Teardown 读取，使卸载依据的是“我们实际做了什么”，
-// 而不是“我们当前认为应该撤销什么”——当 Client 配置在安装与卸载之间发生
-// 变化（例如增加或删除了一条代理规则）时，这一点很重要，可确保我们只移除
-// 自己添加过的内容，不多也不少。
+// State is the write-ahead rollback record for one network namespace.
 type State struct {
-	IngressIface   string         `json:"ingress_iface"`
-	RouteTable     int            `json:"route_table"`
-	FWMark         uint32         `json:"fwmark"`
-	Rules          []RuleSpec     `json:"rules"`
-	SysctlSnapshot SysctlSnapshot `json:"sysctl_snapshot"`
+	Boot     string
+	Table    int
+	Mark     uint32
+	Route    bool
+	Rule     bool
+	Firewall []firewallRule
+	Sysctls  []sysctlChange
 }
 
-// Manager 为所有启用了 preserve_source_ip 的代理规则统一协调 TPROXY 规则集、
-// 策略路由和 sysctls。
+type sysctlChange struct {
+	Name, Before, After string
+}
+
+type firewallRule struct {
+	Table, Chain string
+	Args         []string
+}
+
 type Manager struct {
-	StateDir string // 例如 /var/lib/opennofrp
+	StateDir string
 }
 
-func (m Manager) statePath() string {
-	return filepath.Join(m.StateDir, "tproxy-state.json")
+func (m Manager) statePath() string { return filepath.Join(m.StateDir, "network-journal.json") }
+
+func bootID() (string, error) {
+	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	return string(data), err
 }
 
-// LoadState 读取已持久化的状态（如果有）。若状态文件尚不存在（全新安装，
-// 没有需要拆除的内容），则返回 (nil, nil)。
-func (m Manager) LoadState() (*State, error) {
-	data, err := os.ReadFile(m.statePath())
+func (m Manager) saveState(st *State) error {
+	if err := os.MkdirAll(m.StateDir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(m.StateDir, ".network-journal-*")
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+		return err
+	}
+	defer os.Remove(f.Name())
+	err = errors.Join(json.NewEncoder(f).Encode(st), f.Sync(), f.Close())
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(f.Name(), m.statePath()); err != nil {
+		return err
+	}
+	dir, err := os.Open(m.StateDir)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+func (m Manager) SetupRuntime(ingress string, table int, mark uint32) (err error) {
+	if _, err := os.Lstat(m.statePath()); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("tproxy: recover existing network journal before changing settings: %s", m.statePath())
+	}
+	boot, err := bootID()
+	if err != nil {
+		return err
+	}
+	st := &State{Boot: boot, Table: table, Mark: mark}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, m.Teardown())
 		}
-		return nil, fmt.Errorf("tproxy: read state: %w", err)
+	}()
+	if err := checkRoutingAvailable(table, mark); err != nil {
+		return err
+	}
+
+	// Block loopback traffic arriving from physical interfaces before relaxing
+	// any sysctl. Filter INPUT and FORWARD also cover destinations after DNAT.
+	for _, rule := range loopbackGuards() {
+		if err := m.addFirewall(st, rule); err != nil {
+			return err
+		}
+	}
+	for _, setting := range requiredSysctls(ingress) {
+		old, err := readSysctl(setting.Name)
+		if err != nil {
+			return err
+		}
+		if old == setting.Value {
+			continue
+		}
+		st.Sysctls = append(st.Sysctls, sysctlChange{setting.Name, old, setting.Value})
+		if err := m.saveState(st); err != nil {
+			return err
+		}
+		if err := writeSysctl(setting.Name, setting.Value); err != nil {
+			return err
+		}
+	}
+
+	st.Route = true
+	if err := m.saveState(st); err != nil {
+		return err
+	}
+	if _, err := runIP(routeArgs("add", table)...); err != nil {
+		return err
+	}
+	st.Rule = true
+	if err := m.saveState(st); err != nil {
+		return err
+	}
+	if _, err := runIP(policyArgs("add", table, mark)...); err != nil {
+		return err
+	}
+	for _, args := range connmarkReplyRules(mark) {
+		if err := m.addFirewall(st, firewallRule{"mangle", "OUTPUT", args}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func loopbackGuards() []firewallRule {
+	rules := []firewallRule{}
+	for _, entry := range []struct{ table, chain, address string }{
+		{"raw", "PREROUTING", "-s"}, {"raw", "PREROUTING", "-d"},
+		{"filter", "INPUT", "-d"}, {"filter", "FORWARD", "-d"},
+	} {
+		rules = append(rules, firewallRule{entry.table, entry.chain,
+			[]string{"!", "-i", "lo", entry.address, "127.0.0.0/8", "-m", "comment",
+				"--comment", "opennofrp-loopback-guard", "-j", "DROP"}})
+	}
+	return rules
+}
+
+func (r firewallRule) args(action string) []string {
+	return append([]string{"-w", "3", "-t", r.Table, action, r.Chain}, r.Args...)
+}
+
+func (m Manager) addFirewall(st *State, rule firewallRule) error {
+	if ruleExists(rule.Table, rule.Chain, rule.Args...) {
+		// A pre-existing rule is someone else's and is never recorded for removal.
+		return nil
+	}
+	st.Firewall = append(st.Firewall, rule)
+	if err := m.saveState(st); err != nil {
+		return err
+	}
+	return runIptables(rule.args("-I")...)
+}
+
+func (m Manager) Teardown() error {
+	data, err := os.ReadFile(m.statePath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
 	}
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
-		return nil, fmt.Errorf("tproxy: parse state: %w", err)
+		return err
 	}
-	return &st, nil
-}
-
-func (m Manager) saveState(st State) error {
-	if err := os.MkdirAll(m.StateDir, 0o700); err != nil {
-		return fmt.Errorf("tproxy: create state dir: %w", err)
-	}
-	data, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return fmt.Errorf("tproxy: marshal state: %w", err)
-	}
-	tmp := m.statePath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("tproxy: write state: %w", err)
-	}
-	return os.Rename(tmp, m.statePath())
-}
-
-// Setup 为给定的规则集合应用 TPROXY 规则、策略路由和 sysctls。它是幂等的，
-// 可以在每次 Client 启动时安全调用——每个底层原语（iptables 规则、
-// ip rule/route、sysctls）只有在期望状态尚未就绪时才会修改系统。
-//
-// baseFWMark 是起始 fwmark 值；为保持标记互不相同而给每个 RuleSpec 分配
-// baseFWMark + i 的做法【不在】此处进行——调用方（forwarder 包）应已为每个
-// RuleSpec 分配了不同的 FWMark 值，因为单张以“任意非零标记 -> 本地”为键的
-// 共享策略路由表就能正常工作，且更简单。参见 NewSharedFWMarkRules。
-func (m Manager) Setup(ingressIface string, routeTable int, sharedFWMark uint32, rules []RuleSpec) error {
-	existing, err := m.LoadState()
+	boot, err := bootID()
 	if err != nil {
 		return err
 	}
+	if st.Boot != boot {
+		return os.Remove(m.statePath())
+	}
 
-	var snapshot SysctlSnapshot
-	if existing != nil && existing.SysctlSnapshot != nil {
-		// 在多次 Setup 调用（例如 Client 重启）之间复用安装前的原始快照，
-		// 以免用【我们】在上一次运行中设置的值覆盖“真正的原始”值。
-		snapshot = existing.SysctlSnapshot
-	} else {
-		snapshot, err = CaptureSysctlSnapshot(ingressIface)
-		if err != nil {
-			return fmt.Errorf("tproxy: capture sysctl snapshot: %w", err)
+	var cleanup error
+	if st.Rule {
+		cleanup = errors.Join(cleanup, removeOwnedRule(st.Table, st.Mark))
+	}
+	if st.Route {
+		cleanup = errors.Join(cleanup, removeOwnedRoute(st.Table))
+	}
+	var restore error
+	for _, change := range st.Sysctls {
+		current, err := readSysctl(change.Name)
+		if errors.Is(err, os.ErrNotExist) {
+			continue // the interface no longer exists
 		}
-	}
-
-	if err := ApplySysctls(ingressIface); err != nil {
-		return fmt.Errorf("tproxy: apply sysctls: %w", err)
-	}
-
-	if err := EnsurePolicyRoute(routeTable, sharedFWMark); err != nil {
-		return fmt.Errorf("tproxy: ensure policy route: %w", err)
-	}
-
-	for _, r := range rules {
-		if err := AddTproxyRule(r); err != nil {
-			return fmt.Errorf("tproxy: add rule for port %d: %w", r.PublicPort, err)
+		if err == nil && current == change.After {
+			err = writeSysctl(change.Name, change.Before)
 		}
+		restore = errors.Join(restore, err)
 	}
-
-	st := State{
-		IngressIface:   ingressIface,
-		RouteTable:     routeTable,
-		FWMark:         sharedFWMark,
-		Rules:          rules,
-		SysctlSnapshot: snapshot,
+	for i := len(st.Firewall) - 1; i >= 0; i-- {
+		r := st.Firewall[i]
+		// Keep the ingress guards if we could not restore the original isolation.
+		if restore != nil && r.Table != "mangle" {
+			continue
+		}
+		cleanup = errors.Join(cleanup, deleteRecordedFirewallRule(r))
 	}
-	return m.saveState(st)
-}
-
-// SetupRuntime persists the host routing and sysctl changes used by direct
-// source-address spoofing, while retaining any managed listener rules.
-func (m Manager) SetupRuntime(ingressIface string, routeTable int, sharedFWMark uint32) error {
-	existing, err := m.LoadState()
-	if err != nil {
+	if err := errors.Join(cleanup, restore); err != nil {
 		return err
 	}
-	var rules []RuleSpec
-	var snapshot SysctlSnapshot
-	if existing != nil {
-		rules = existing.Rules
-		snapshot = existing.SysctlSnapshot
+	return os.Remove(m.statePath())
+}
+
+func deleteRecordedFirewallRule(r firewallRule) error {
+	err := runIptables(r.args("-D")...)
+	if err == nil {
+		return nil
 	}
-	if snapshot == nil {
-		snapshot, err = CaptureSysctlSnapshot(ingressIface)
-		if err != nil {
-			return fmt.Errorf("tproxy: capture sysctl snapshot: %w", err)
-		}
+	// Listing the chain distinguishes an already-absent rule from a missing
+	// iptables binary, an inaccessible table, or an xtables lock failure.
+	if listErr := runIptables("-w", "3", "-t", r.Table, "-S", r.Chain); listErr != nil {
+		return errors.Join(err, listErr)
 	}
-	if err := ApplySysctls(ingressIface); err != nil {
-		return fmt.Errorf("tproxy: apply sysctls: %w", err)
-	}
-	rollback := func() {
-		_ = RemoveConnmarkReplyRules(sharedFWMark)
-		_ = RemovePolicyRoute(routeTable, sharedFWMark)
-		_ = RestoreSysctls(snapshot)
-	}
-	if err := EnsurePolicyRoute(routeTable, sharedFWMark); err != nil {
-		rollback()
-		return fmt.Errorf("tproxy: ensure policy route: %w", err)
-	}
-	if err := EnsureConnmarkReplyRules(sharedFWMark); err != nil {
-		rollback()
-		return fmt.Errorf("tproxy: ensure CONNMARK reply rules: %w", err)
-	}
-	if err := m.saveState(State{IngressIface: ingressIface, RouteTable: routeTable, FWMark: sharedFWMark, Rules: rules, SysctlSnapshot: snapshot}); err != nil {
-		rollback()
+	if ruleExists(r.Table, r.Chain, r.Args...) {
 		return err
 	}
 	return nil
 }
 
-// Teardown 移除持久化状态中记录的所有内容：iptables 规则、策略路由，并将
-// sysctls 恢复为安装前的值。卸载脚本调用的就是它。若状态文件不存在（从未
-// 进行过配置，或已被拆除），则不执行任何操作。
-func (m Manager) Teardown() error {
-	st, err := m.LoadState()
-	if err != nil {
-		return err
-	}
+// Policy routing commands carry an explicit protocol and priority so teardown
+// can remove only the entries owned by this client.
+const routeProtocol = "241"
+const rulePriority = "12141"
 
-	// rulesync 的配置路径会直接安装 OUTPUT CONNMARK 规则对（不写入状态文件），
-	// 因此这里根据它所使用的常量无条件移除——规则不存在时也是幂等的。
-	connmarkFWMark := uint32(DefaultFWMark)
-	if st != nil {
-		connmarkFWMark = st.FWMark
-	}
-	if err := RemoveConnmarkReplyRules(connmarkFWMark); err != nil {
-		return err
-	}
+func routeArgs(action string, table int) []string {
+	return []string{"-4", "route", action, "local", "0.0.0.0/0", "dev", "lo",
+		"table", strconv.Itoa(table), "proto", routeProtocol}
+}
 
-	if st == nil {
-		return nil // 没有其他需要处理的内容
-	}
-
-	var firstErr error
-	for _, r := range st.Rules {
-		if err := RemoveTproxyRule(r); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-
-	if err := RemovePolicyRoute(st.RouteTable, st.FWMark); err != nil && firstErr == nil {
-		firstErr = err
-	}
-
-	if st.SysctlSnapshot != nil {
-		if err := RestoreSysctls(st.SysctlSnapshot); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-
-	if firstErr == nil {
-		if err := os.Remove(m.statePath()); err != nil && !os.IsNotExist(err) {
-			firstErr = err
-		}
-	}
-
-	return firstErr
+func policyArgs(action string, table int, mark uint32) []string {
+	return []string{"-4", "rule", action, "pref", rulePriority, "fwmark", fwmarkSpec(mark),
+		"table", strconv.Itoa(table), "protocol", routeProtocol}
 }

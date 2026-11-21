@@ -148,6 +148,9 @@ func (g *ruleGuard) admit(ip net.IP) (release func(), reason string) {
 	if g.cfg.ConnRatePerMin > 0 {
 		b := g.rates[key]
 		if b == nil {
+			if len(g.rates) >= 4096 {
+				return noop, guardRateLimited
+			}
 			per := float64(g.cfg.ConnRatePerMin)
 			b = newTokenBucket(per/60, per)
 			g.rates[key] = b
@@ -271,6 +274,15 @@ func (m *Manager) setGuards(desired []RuleView) {
 	m.guardMu.Lock()
 	defer m.guardMu.Unlock()
 	for _, r := range desired {
+		if r.Protocol != "" && r.Guard.MaxConnsPerIP <= 0 {
+			r.Guard.MaxConnsPerIP = 64
+			if r.Protocol == "udp" {
+				r.Guard.MaxConnsPerIP = 16
+			}
+		}
+		if r.Protocol == "udp" && r.Guard.ConnRatePerMin <= 0 {
+			r.Guard.ConnRatePerMin = 60
+		}
 		if r.Guard.empty() {
 			continue
 		}

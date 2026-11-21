@@ -5,10 +5,13 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,7 +23,7 @@ import (
 // newMigrationTestPanel 构造一个带迁移路径的面板测试服务器。
 func newMigrationTestPanel(t *testing.T, st *store.Store, dir string) *httptest.Server {
 	t.Helper()
-	p := New(st, nil, nil, "http://127.0.0.1", "127.0.0.1", 17000, "", filepath.Join(dir, "bins"))
+	p := New(st, slog.Default(), nil, "https://panel.example.test", "127.0.0.1", 17000, "", filepath.Join(dir, "bins"))
 	p.MigrationPaths = &MigrationPaths{
 		ConfigFile: filepath.Join(dir, "server.toml"),
 		DBPath:     filepath.Join(dir, "opennofrp.db"),
@@ -29,7 +32,12 @@ func newMigrationTestPanel(t *testing.T, st *store.Store, dir string) *httptest.
 		ACMEDir:    filepath.Join(dir, "acme"),
 		DataDir:    dir,
 	}
-	srv := httptest.NewServer(p.Handler())
+	_, loopback, _ := net.ParseCIDR("127.0.0.1/32")
+	p.TrustedProxies = []*net.IPNet{loopback}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("X-Forwarded-Proto", "https")
+		p.Handler().ServeHTTP(w, r)
+	}))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -98,6 +106,13 @@ func TestMigrationTokenLifecycleAndBundle(t *testing.T) {
 	if !strings.Contains(script, "opennofrp-server") || !strings.Contains(script, tok) {
 		t.Fatal("migrate script incomplete")
 	}
+	if bash, err := exec.LookPath("bash"); err == nil {
+		cmd := exec.Command(bash, "-n")
+		cmd.Stdin = strings.NewReader(script)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("migration script has invalid shell syntax: %v: %s", err, output)
+		}
+	}
 	// 坏令牌格式被拒绝。
 	if resp, _ := do(t, "GET", srv.URL+"/migrate.sh?token=bad!token", nil, nil); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("migrate.sh with invalid token = %d, want 400", resp.StatusCode)
@@ -125,7 +140,7 @@ func TestMigrationTokenLifecycleAndBundle(t *testing.T) {
 	if resp, _ := do(t, "GET", srv.URL+"/migrate/data?token="+tok, nil, nil); resp.StatusCode != http.StatusForbidden {
 		t.Errorf("reused migration token = %d, want 403", resp.StatusCode)
 	}
-	if resp, _ := do(t, "GET", srv.URL+"/migrate/data?token=nonexistent0", nil, nil); resp.StatusCode != http.StatusForbidden {
+	if resp, _ := do(t, "GET", srv.URL+"/migrate/data?token=000000000000000000000000000000000000000000000000", nil, nil); resp.StatusCode != http.StatusForbidden {
 		t.Errorf("unknown migration token = %d, want 403", resp.StatusCode)
 	}
 }
@@ -137,7 +152,7 @@ func extractToken(t *testing.T, page string) string {
 		t.Fatal("migration command not found")
 	}
 	rest := page[i+len("/migrate.sh?token="):]
-	end := strings.IndexAny(rest, "\"&")
+	end := strings.IndexAny(rest, "\"&'")
 	if end < 0 {
 		t.Fatal("unterminated token")
 	}

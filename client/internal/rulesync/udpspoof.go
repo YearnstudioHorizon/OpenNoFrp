@@ -38,14 +38,11 @@ func (r *Reconciler) dialSpoofedUDP(ctx context.Context, rule protocol.Rule, met
 	}
 	if err == nil && owner.Kind == envcheck.OwnerDockerBridgeNetwork {
 		cns := netnsworker.ContainerNetns{PID: owner.PID}
-		if err := r.ensureNetnsReady(cns); err != nil {
+		namespace, err := r.prepareNetns(cns)
+		if err != nil {
 			return nil, fmt.Errorf("container netns setup: %w", err)
 		}
-		type result struct {
-			c   net.Conn
-			err error
-		}
-		ch := make(chan result, 1)
+
 		containerPort := rule.LocalPort
 		containerIP := net.ParseIP("127.0.0.1")
 		if owner.TargetIP != "" {
@@ -54,16 +51,13 @@ func (r *Reconciler) dialSpoofedUDP(ctx context.Context, rule protocol.Rule, met
 		if owner.TargetPort != 0 {
 			containerPort = owner.TargetPort
 		}
-		go func() {
-			if err := cns.Enter(); err != nil {
-				ch <- result{nil, fmt.Errorf("enter container netns: %w", err)}
-				return
-			}
-			c, err := dialer.DialSpoofedUDP(ctx, meta.ClientAddr, meta.ClientPort, containerIP, containerPort)
-			ch <- result{c, err}
-		}()
-		res := <-ch
-		return res.c, res.err
+		var upstream net.Conn
+		err = netnsworker.RunPath(namespace, func() error {
+			conn, err := dialer.DialSpoofedUDP(ctx, meta.ClientAddr, meta.ClientPort, containerIP, containerPort)
+			upstream = conn
+			return err
+		})
+		return upstream, err
 	}
 
 	if err := r.ensureHostTPROXYReady(); err != nil {

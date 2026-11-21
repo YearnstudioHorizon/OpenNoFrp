@@ -10,8 +10,8 @@
 #     tproxy-teardown，以防服务早已停止、
 #     ExecStopPost 从未触发
 #   - 仅删除以下内容：/etc/systemd/system/opennofrp-client.service、
-#     /opt/opennofrp/、/var/lib/opennofrp/
-#   - 默认不删除 /etc/opennofrp/client.toml（你的配置及其中的任何密钥
+#     /opt/opennofrp-client/、/var/lib/opennofrp-client/
+#   - 默认不删除 /etc/opennofrp-client/client.toml（你的配置及其中的任何密钥
 #     都会保留，除非传入 --purge-config）
 #   - 绝不运行笼统的 "iptables -F" / "nft flush ruleset" / "ip route
 #     flush" -- 只处理 opennofrp 自身所跟踪的那些规则
@@ -26,9 +26,9 @@ for arg in "$@"; do
   esac
 done
 
-INSTALL_DIR="/opt/opennofrp"
-CONFIG_DIR="/etc/opennofrp"
-STATE_DIR="/var/lib/opennofrp"
+INSTALL_DIR="/opt/opennofrp-client"
+CONFIG_DIR="/etc/opennofrp-client"
+STATE_DIR="/var/lib/opennofrp-client"
 SYSTEMD_UNIT="/etc/systemd/system/opennofrp-client.service"
 BINARY_DEST="$INSTALL_DIR/opennofrp-client"
 
@@ -36,6 +36,11 @@ log() { echo "[opennofrp-uninstall] $*"; }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "[opennofrp-uninstall] ERROR: must be run as root" >&2
+  exit 1
+fi
+
+if systemctl show -p ExecStart --value opennofrp-client.service 2>/dev/null | grep -Fq '/opt/opennofrp/opennofrp-client'; then
+  log "Legacy client installation detected. Follow the upgrade notes to remove it safely."
   exit 1
 fi
 
@@ -49,7 +54,7 @@ fi
 
 if [ -x "$BINARY_DEST" ]; then
   log "running tproxy-teardown directly (belt-and-suspenders, in case the service's ExecStopPost didn't run)"
-  "$BINARY_DEST" tproxy-teardown -state-dir "$STATE_DIR" || log "teardown reported an error (see above); continuing with file removal"
+  "$BINARY_DEST" tproxy-teardown -state-dir "$STATE_DIR" || { log "teardown failed; keeping the recovery journal and binary"; exit 1; }
 else
   log "binary not found at $BINARY_DEST, cannot run tproxy-teardown -- if TPROXY rules are still active, remove them manually (see docs/01-architecture.md section 6.1 for what to look for: iptables-legacy mangle rules commented 'opennofrp-port-*', ip rule for fwmark 0x1, ip route table 100)"
 fi
@@ -65,18 +70,11 @@ if [ -d "$INSTALL_DIR" ]; then
   rm -rf "$INSTALL_DIR"
 fi
 
-if [ -d "$STATE_DIR" ]; then
-  log "removing $STATE_DIR"
-  rm -rf "$STATE_DIR"
-fi
-
 if [ "$PURGE_CONFIG" -eq 1 ]; then
-  if [ -d "$CONFIG_DIR" ]; then
-    log "--purge-config given: removing $CONFIG_DIR"
-    rm -rf "$CONFIG_DIR"
-  fi
+  log "--purge-config given: removing client config and state"
+  rm -rf -- "$CONFIG_DIR" "$STATE_DIR"
 else
-  log "keeping $CONFIG_DIR (pass --purge-config to also remove it)"
+  log "keeping $CONFIG_DIR and $STATE_DIR"
 fi
 
 log "uninstall complete. Verifying no leftover TPROXY rules:"

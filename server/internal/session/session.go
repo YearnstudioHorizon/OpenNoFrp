@@ -3,6 +3,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -186,10 +187,20 @@ func (s *Session) OpenHTTPStream(clientIP net.IP, clientPort uint16, ruleID uint
 
 // OpenAckStream 与 OpenHTTPStream 相同，但可在尾部区段附带 SNI 提示（TLS 透传规则）。
 func (s *Session) OpenAckStream(clientIP net.IP, clientPort uint16, ruleID uint32, sni string, timeout time.Duration) (net.Conn, error) {
+	return s.OpenAckStreamContext(context.Background(), clientIP, clientPort, ruleID, sni, timeout)
+}
+
+func (s *Session) OpenAckStreamContext(ctx context.Context, clientIP net.IP, clientPort uint16, ruleID uint32, sni string, timeout time.Duration) (net.Conn, error) {
 	stream, err := s.Yamux.Open()
 	if err != nil {
 		return nil, fmt.Errorf("session: open yamux stream (http): %w", err)
 	}
+	stop := context.AfterFunc(ctx, func() { _ = stream.SetDeadline(time.Now()); stream.Close() })
+	defer stop()
+	if timeout > 0 {
+		_ = stream.SetDeadline(time.Now().Add(timeout))
+	}
+
 	if clientIP == nil {
 		clientIP = net.IPv4zero
 	}
@@ -205,15 +216,12 @@ func (s *Session) OpenAckStream(clientIP net.IP, clientPort uint16, ruleID uint3
 		stream.Close()
 		return nil, fmt.Errorf("session: write stream metadata: %w", err)
 	}
-	if timeout > 0 {
-		stream.SetReadDeadline(time.Now().Add(timeout))
-	}
 	var ack [1]byte
 	if _, err := io.ReadFull(stream, ack[:]); err != nil {
 		stream.Close()
 		return nil, fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
 	}
-	stream.SetReadDeadline(time.Time{})
+	stream.SetDeadline(time.Time{})
 	if ack[0] != protocol.DialAckOK {
 		stream.Close()
 		return nil, ErrBackendUnavailable

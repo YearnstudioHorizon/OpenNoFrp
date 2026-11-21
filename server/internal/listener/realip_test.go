@@ -55,19 +55,19 @@ func TestExtractClientIP(t *testing.T) {
 		fromHeader bool
 	}{
 		{"default remote", httpRoute{}, "10.0.0.1:1", map[string]string{"X-Forwarded-For": "2.2.2.2"}, "10.0.0.1", false},
-		{"priority cf first", httpRoute{IPSources: []string{"cf-connecting-ip", "x-forwarded-for"}}, "10.0.0.1:1",
+		{"priority cf first", httpRoute{TrustedProxies: mustNets(t, "10.0.0.1"), IPSources: []string{"cf-connecting-ip", "x-forwarded-for"}}, "10.0.0.1:1",
 			map[string]string{"CF-Connecting-IP": "1.1.1.1", "X-Forwarded-For": "2.2.2.2, 3.3.3.3"}, "1.1.1.1", true},
-		{"fallback to xff leftmost", httpRoute{IPSources: []string{"cf-connecting-ip", "x-forwarded-for"}}, "10.0.0.1:1",
-			map[string]string{"X-Forwarded-For": "2.2.2.2, 3.3.3.3"}, "2.2.2.2", true},
-		{"remote_addr before headers", httpRoute{IPSources: []string{"remote_addr", "x-real-ip"}}, "10.0.0.1:1",
+		{"fallback to first untrusted hop", httpRoute{TrustedProxies: mustNets(t, "10.0.0.1"), IPSources: []string{"cf-connecting-ip", "x-forwarded-for"}}, "10.0.0.1:1",
+			map[string]string{"X-Forwarded-For": "2.2.2.2, 3.3.3.3"}, "3.3.3.3", true},
+		{"remote_addr before headers", httpRoute{TrustedProxies: mustNets(t, "10.0.0.1"), IPSources: []string{"remote_addr", "x-real-ip"}}, "10.0.0.1:1",
 			map[string]string{"X-Real-IP": "4.4.4.4"}, "10.0.0.1", false},
-		{"invalid header falls through", httpRoute{IPSources: []string{"x-real-ip", "true-client-ip"}}, "10.0.0.1:1",
+		{"invalid header falls through", httpRoute{TrustedProxies: mustNets(t, "10.0.0.1"), IPSources: []string{"x-real-ip", "true-client-ip"}}, "10.0.0.1:1",
 			map[string]string{"X-Real-IP": "garbage", "True-Client-IP": "6.6.6.6"}, "6.6.6.6", true},
 		{"untrusted peer ignored", httpRoute{IPSources: []string{"x-forwarded-for"}, TrustedProxies: mustNets(t, "10.0.0.0/8")}, "192.168.1.1:1",
 			map[string]string{"X-Forwarded-For": "5.5.5.5"}, "192.168.1.1", false},
 		{"trusted chain right-to-left", httpRoute{IPSources: []string{"x-forwarded-for"}, TrustedProxies: mustNets(t, "10.0.0.0/8")}, "10.0.0.1:1",
 			map[string]string{"X-Forwarded-For": "9.9.9.9, 5.5.5.5, 10.0.0.2"}, "5.5.5.5", true},
-		{"forwarded ipv6", httpRoute{IPSources: []string{"forwarded"}}, "10.0.0.1:1",
+		{"forwarded ipv6", httpRoute{TrustedProxies: mustNets(t, "10.0.0.1"), IPSources: []string{"forwarded"}}, "10.0.0.1:1",
 			map[string]string{"Forwarded": `for="[2001:db8::1]:4711";proto=http`}, "2001:db8::1", true},
 	}
 	for _, c := range cases {

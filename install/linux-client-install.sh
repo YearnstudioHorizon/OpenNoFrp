@@ -2,8 +2,8 @@
 # OpenNoFrp 客户端安装脚本 (Linux)。
 #
 # 本脚本只做以下几件事（除此之外不做任何事）：
-#   1. 将 opennofrp-client 二进制文件复制到 /opt/opennofrp/opennofrp-client
-#   2. 将初始配置写入 /etc/opennofrp/client.toml（若尚不存在）
+#   1. 将 opennofrp-client 二进制文件复制到 /opt/opennofrp-client/opennofrp-client
+#   2. 将初始配置写入 /etc/opennofrp-client/client.toml（若尚不存在）
 #   3. 安装 systemd 单元（全新安装时不会自动启动 -- 见下文）
 #   4. 运行 "opennofrp-client envcheck"，让你在启动服务之前就知道
 #      preserve_source_ip 在本机上能否真正生效
@@ -19,7 +19,7 @@
 #     且仅在启动后进行，并只在其专属的
 #     fwmark/table/chain-comment 命名空间内操作 -- 见 docs/01-architecture.md）
 #   - 替你启用或启动 systemd 服务（全新安装时）。你必须先编辑
-#     /etc/opennofrp/client.toml（设置 server.addr/token 以及你的
+#     /etc/opennofrp-client/client.toml（设置 server.addr/token 以及你的
 #     [[proxy]] 规则），然后运行：
 #       systemctl enable --now opennofrp-client
 #   - 覆盖已存在的配置文件
@@ -29,10 +29,10 @@
 set -euo pipefail
 
 BINARY_SRC="${1:-./opennofrp-client}"
-INSTALL_DIR="/opt/opennofrp"
-CONFIG_DIR="/etc/opennofrp"
+INSTALL_DIR="/opt/opennofrp-client"
+CONFIG_DIR="/etc/opennofrp-client"
 CONFIG_FILE="$CONFIG_DIR/client.toml"
-STATE_DIR="/var/lib/opennofrp"
+STATE_DIR="/var/lib/opennofrp-client"
 SERVICE_NAME="opennofrp-client"
 SYSTEMD_UNIT="/etc/systemd/system/$SERVICE_NAME.service"
 BINARY_DEST="$INSTALL_DIR/opennofrp-client"
@@ -47,6 +47,15 @@ if [ "$(id -u)" -ne 0 ]; then
   err "this installer must be run as root (TPROXY requires root/CAP_NET_ADMIN+CAP_NET_RAW)"
   exit 1
 fi
+
+if systemctl show -p ExecStart --value "$SERVICE_NAME" 2>/dev/null | grep -Fq '/opt/opennofrp/opennofrp-client'; then
+  err "Legacy client installation detected. Follow the upgrade notes before installing."
+  exit 1
+fi
+for dir in "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"; do
+  if [ -L "$dir" ]; then err "Refusing symlink: $dir"; exit 1; fi
+  install -d -m 0700 -o root -g root "$dir"
+done
 
 if [ ! -f "$BINARY_SRC" ]; then
   err "binary not found at $BINARY_SRC"

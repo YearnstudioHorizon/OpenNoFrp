@@ -126,7 +126,7 @@ func HashBasicAuthPassword(password string) (string, error) {
 }
 
 // dummyBcrypt 用于用户不存在时仍执行一次比较，避免通过耗时探测用户名。
-var dummyBcrypt, _ = bcrypt.GenerateFromPassword([]byte("opennofrp-dummy"), bcrypt.MinCost)
+var dummyBcrypt, _ = bcrypt.GenerateFromPassword([]byte("opennofrp-dummy"), bcrypt.DefaultCost)
 
 // checkBasicAuth 报告请求是否携带有效的 Basic Auth 凭据。accounts 为空时总是放行。
 func checkBasicAuth(r *http.Request, accounts map[string]string) bool {
