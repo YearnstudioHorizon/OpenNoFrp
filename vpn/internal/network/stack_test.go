@@ -442,12 +442,17 @@ func runConcurrentConnections(t *testing.T) {
 func runTCPAndCancellation(t *testing.T, diagnostics bool, payload []byte) {
 	var logMu sync.Mutex
 	var messages []string
+	responseLogged := make(chan struct{})
+	var responseOnce sync.Once
 	var diagnostic func(string, ...any)
 	if diagnostics {
 		diagnostic = func(format string, args ...any) {
 			logMu.Lock()
 			defer logMu.Unlock()
 			messages = append(messages, fmt.Sprintf(format, args...))
+			if strings.HasPrefix(format, "TCP 收到目标响应") {
+				responseOnce.Do(func() { close(responseLogged) })
+			}
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -496,6 +501,12 @@ func runTCPAndCancellation(t *testing.T, diagnostics bool, payload []byte) {
 		t.Fatal("TCP reply differs from request")
 	}
 	if diagnostics {
+		// The reader can receive the bytes before diagnosticConn.Write logs them.
+		select {
+		case <-responseLogged:
+		case <-ctx.Done():
+			t.Fatal("target response was not logged before the deadline")
+		}
 		logMu.Lock()
 		joined := strings.Join(messages, "\n")
 		logMu.Unlock()
