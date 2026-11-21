@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSplitDomainsAndPath(t *testing.T) {
@@ -216,5 +217,33 @@ INSERT INTO rules (client_id, name, protocol, local_port, remote_port, enabled, 
 	}
 	if !strings.Contains(ddl, "'tls'") || strings.Contains(strings.ToUpper(ddl), "UNIQUE") {
 		t.Errorf("rules DDL not migrated: %s", ddl)
+	}
+}
+
+func TestRegisterClientConsumesTokenAndCreatesOneIdentity(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "concurrent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	token, err := st.CreateRegisterToken(ctx, "device label", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, _, err := st.RegisterClient(ctx, token.Token, "device hostname")
+			results <- err
+		}()
+	}
+	first, second := <-results, <-results
+	if (first == nil) == (second == nil) {
+		t.Fatalf("want one successful registration, got %v and %v", first, second)
+	}
+	clients, err := st.ListClients(ctx)
+	if err != nil || len(clients) != 1 || clients[0].Name != "device label" {
+		t.Fatalf("want one registered device using the token label, got %v, %v", clients, err)
 	}
 }

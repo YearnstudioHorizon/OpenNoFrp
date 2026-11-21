@@ -113,13 +113,18 @@ type Manager struct {
 
 	reconcileMu sync.Mutex
 	// MaxTCPConnections and TCPIdleTimeout must be set before opening listeners.
-	MaxTCPConnections int
-	TCPIdleTimeout    time.Duration
-	tcpActive         int
-	mu                sync.Mutex
-	tcp               map[uint16]*tcpListener
-	udp               map[uint16]*udpListener
-	http              map[uint16]*httpListener
+	MaxTCPConnections                               int
+	TCPIdleTimeout                                  time.Duration
+	tcpActive                                       int
+	httpSockets, tlsSockets, httpBackends, httpAuth chan struct{}
+	udpActive                                       int
+	udpPerRule                                      map[uint32]int
+	udpPerSource                                    map[string]int
+	udpStarts                                       *tokenBucket
+	mu                                              sync.Mutex
+	tcp                                             map[uint16]*tcpListener
+	udp                                             map[uint16]*udpListener
+	http                                            map[uint16]*httpListener
 	// tlsPass 是 TLS 透传（SNI 路由）监听器，见 sni.go。
 	tlsPass map[uint16]*tlsPassListener
 
@@ -170,6 +175,13 @@ func NewManager(bindAddr string, logger *slog.Logger, lookup SessionLookup) *Man
 	return &Manager{
 		BindAddr:          bindAddr,
 		MaxTCPConnections: 512,
+		httpSockets:       make(chan struct{}, 512),
+		tlsSockets:        make(chan struct{}, 512),
+		httpBackends:      make(chan struct{}, 512),
+		httpAuth:          make(chan struct{}, 4),
+		udpPerRule:        make(map[uint32]int),
+		udpPerSource:      make(map[string]int),
+		udpStarts:         newTokenBucket(128, 128),
 		TCPIdleTimeout:    5 * time.Minute,
 		Logger:            logger,
 		Lookup:            lookup,
@@ -327,15 +339,22 @@ func (m *Manager) udpLoop(ul *udpListener) {
 		flow, ok := ul.flows[key]
 		m.mu.Unlock()
 		if !ok {
+			source := remote.IP.String()
+			if !m.acquireUDP(ul.ruleID, source) {
+				m.statRejected(ul.ruleID)
+				continue
+			}
 			g := m.guardFor(ul.ruleID)
 			release, reason := g.admit(remote.IP)
 			if reason != guardOK {
+				m.releaseUDP(ul.ruleID, source)
 				m.Logger.Debug("udp flow rejected by rule protection", "rule_id", ul.ruleID, "remote", key, "reason", reason)
 				m.statRejected(ul.ruleID)
 				continue
 			}
 			sess := m.Lookup(ul.clientID)
 			if sess == nil {
+				m.releaseUDP(ul.ruleID, source)
 				release()
 				m.statBackendError(ul.ruleID, "client offline")
 				m.Logger.Warn("udp datagram for offline client, dropping", "rule_id", ul.ruleID, "remote", key)
@@ -343,20 +362,30 @@ func (m *Manager) udpLoop(ul *udpListener) {
 			}
 			stream, err := sess.OpenUDPStreamOffset(remote, ul.ruleID, ul.offset)
 			if err != nil {
+				m.releaseUDP(ul.ruleID, source)
 				release()
 				m.Logger.Error("failed to open udp stream", "rule_id", ul.ruleID, "error", err)
 				continue
 			}
 			done := m.statOpened(ul.ruleID)
-			flow = &udpFlow{remote: remote, stream: stream, act: make(chan struct{}, 64), writeQ: make(chan []byte, 64), release: func() { release(); done() }, guard: g, done: make(chan struct{})}
+			flow = &udpFlow{remote: remote, stream: stream, act: make(chan struct{}, 64), writeQ: make(chan []byte, 8), release: func() { release(); done() }, guard: g, done: make(chan struct{})}
 			m.mu.Lock()
+			select {
+			case <-ul.done:
+				m.mu.Unlock()
+				m.releaseUDP(ul.ruleID, source)
+				stream.Close()
+				flow.release()
+				return
+			default:
+			}
 			ul.flows[key] = flow
 			m.mu.Unlock()
 			go m.udpFlowTX(ul, flow) // UDP 套接字 -> stream
 			go m.udpFlowRX(ul, flow) // stream -> UDP 套接字
 			go m.udpFlowWriter(ul, flow)
 		}
-		if !flow.guard.allowBandwidth(n) {
+		if len(flow.writeQ) == cap(flow.writeQ) || !flow.guard.allowBandwidth(n) {
 			continue // 超出规则带宽上限，丢弃该数据报
 		}
 		m.statBytes(ul.ruleID, n, 0)
@@ -433,6 +462,10 @@ func (m *Manager) udpFlowRX(ul *udpListener, flow *udpFlow) {
 			continue
 		}
 		m.statBytes(ul.ruleID, 0, len(payload))
+		select {
+		case flow.act <- struct{}{}:
+		default:
+		}
 		if _, err := ul.conn.WriteToUDP(payload, flow.remote); err != nil {
 			m.reapFlow(ul, flow)
 			return
@@ -445,7 +478,7 @@ func (m *Manager) reapFlow(ul *udpListener, flow *udpFlow) {
 	m.mu.Lock()
 	current, ok := ul.flows[key]
 	if ok && current == flow {
-		delete(ul.flows, key)
+		m.removeUDPFlowLocked(ul, key, flow)
 	} else {
 		ok = false
 	}
@@ -496,7 +529,7 @@ func (m *Manager) ClosePort(protocol string, port uint16) {
 func (m *Manager) reapFlowLocked(ul *udpListener, key string) {
 	flow, ok := ul.flows[key]
 	if ok {
-		delete(ul.flows, key)
+		m.removeUDPFlowLocked(ul, key, flow)
 		flow.closeOnce.Do(func() {
 			close(flow.done)
 		})
@@ -505,6 +538,42 @@ func (m *Manager) reapFlowLocked(ul *udpListener, key string) {
 		if flow.release != nil {
 			flow.release()
 		}
+	}
+}
+
+func (m *Manager) acquireUDP(ruleID uint32, source string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.udpActive >= 256 || m.udpPerRule[ruleID] >= 128 ||
+		m.udpPerSource[source] >= 16 || !m.udpStarts.allow(time.Now(), 1) {
+		return false
+	}
+	m.udpActive++
+	m.udpPerRule[ruleID]++
+	m.udpPerSource[source]++
+	return true
+}
+
+func (m *Manager) releaseUDP(ruleID uint32, source string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.releaseUDPLocked(ruleID, source)
+}
+
+func (m *Manager) removeUDPFlowLocked(ul *udpListener, key string, flow *udpFlow) {
+	delete(ul.flows, key)
+	m.releaseUDPLocked(ul.ruleID, flow.remote.IP.String())
+}
+
+func (m *Manager) releaseUDPLocked(ruleID uint32, source string) {
+	m.udpActive--
+	m.udpPerRule[ruleID]--
+	if m.udpPerRule[ruleID] == 0 {
+		delete(m.udpPerRule, ruleID)
+	}
+	m.udpPerSource[source]--
+	if m.udpPerSource[source] == 0 {
+		delete(m.udpPerSource, source)
 	}
 }
 

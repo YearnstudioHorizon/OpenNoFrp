@@ -30,6 +30,9 @@ type ServerConfig struct {
 	Token       string `toml:"token"`       // 来自面板的一次性注册 token；仅在尚不存在凭据文件时需要
 	Fingerprint string `toml:"fingerprint"` // 服务端 TLS 证书的 SHA-256 指纹 (Certificate Pinning)
 
+	// If a rule requires source IP preservation, fail the flow when it is unavailable.
+	StrictSourceIP bool `toml:"strict_source_ip"`
+
 	// HeartbeatIntervalSeconds 控制 Client 在控制连接上发送心跳的频率。
 	// 为零时默认为 10。
 	HeartbeatIntervalSeconds int `toml:"heartbeat_interval_seconds"`
@@ -86,14 +89,52 @@ func SaveCredentials(path string, c Credentials) error {
 		return fmt.Errorf("config: mkdir for credentials: %w", err)
 	}
 	data := fmt.Sprintf("client_id = %q\nclient_secret = %q\nfingerprint = %q\n", c.ClientID, c.ClientSecret, c.Fingerprint)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(data), 0o600); err != nil {
-		return fmt.Errorf("config: write credentials: %w", err)
+	return writePrivateFile(path, []byte(data))
+}
+
+type ServerPin struct {
+	Address     string `toml:"address"`
+	Fingerprint string `toml:"fingerprint"`
+}
+
+func LoadServerPin(path string) (ServerPin, error) {
+	var pin ServerPin
+	_, err := toml.DecodeFile(path, &pin)
+	if os.IsNotExist(err) {
+		return ServerPin{}, nil
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("config: rename credentials: %w", err)
+	if err == nil && (pin.Address == "" || pin.Fingerprint == "") {
+		return ServerPin{}, fmt.Errorf("invalid server pin at %s", path)
 	}
-	return nil
+	return pin, err
+}
+
+func SaveServerPin(path string, pin ServerPin) error {
+	return writePrivateFile(path, fmt.Appendf(nil, "address = %q\nfingerprint = %q\n", pin.Address, pin.Fingerprint))
+}
+
+func writePrivateFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".opennofrp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // Load 从给定路径读取并校验 Config。
@@ -159,6 +200,7 @@ port = 17000
 # this value can be deleted.
 token = "PASTE_REGISTRATION_TOKEN_HERE"
 
+# strict_source_ip = true  # fail flows that request source-IP preservation if unavailable
 heartbeat_interval_seconds = 10
 reconnect_min_seconds = 1
 reconnect_max_seconds = 60

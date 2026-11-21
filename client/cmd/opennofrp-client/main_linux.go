@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -20,15 +21,14 @@ import (
 	"opennofrp/client/internal/controlconn"
 	"opennofrp/client/internal/envcheck"
 	"opennofrp/client/internal/rulesync"
-	"opennofrp/client/internal/tproxy"
 	"opennofrp/pkg/protocol"
 	"opennofrp/pkg/tempvpn"
 	"opennofrp/pkg/updater"
 	"opennofrp/pkg/version"
 )
 
-const defaultConfigPath = "/etc/opennofrp/client.toml"
-const defaultStateDir = "/var/lib/opennofrp"
+const defaultConfigPath = "/etc/opennofrp-client/client.toml"
+const defaultStateDir = "/var/lib/opennofrp-client"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -88,8 +88,7 @@ func runTproxyTeardown() {
 	stateDir := fs.String("state-dir", defaultStateDir, "directory for TPROXY state")
 	fs.Parse(os.Args[2:])
 
-	mgr := tproxy.Manager{StateDir: *stateDir}
-	if err := mgr.Teardown(); err != nil {
+	if err := rulesync.TeardownNetwork(*stateDir); err != nil {
 		fmt.Fprintf(os.Stderr, "error during teardown: %v\n", err)
 		os.Exit(1)
 	}
@@ -125,12 +124,16 @@ func runClient() {
 	os.Setenv("OPENNOFRP_CLIENT_CONFIG", *configPath)
 
 	rules := rulesync.New(logger, *stateDir)
+	rules.StrictSourceIP = cfg.Server.StrictSourceIP
 
-	st, err := os.Stat(*stateDir)
-	if err != nil {
-		os.MkdirAll(*stateDir, 0o700)
+	if err := os.MkdirAll(*stateDir, 0700); err != nil {
+		logger.Error("create client state directory", "error", err)
+		os.Exit(1)
 	}
-	_ = st
+	if err := rulesync.TeardownNetwork(*stateDir); err != nil {
+		logger.Error("recover previous client network changes", "error", err)
+		os.Exit(1)
+	}
 
 	client := &controlconn.Client{
 		Cfg:    cfg,
@@ -151,7 +154,12 @@ func runClient() {
 		client.Update = func(ctx context.Context) (updater.Result, error) {
 			return updater.SelfUpdateWithResult(ctx, "opennofrp-client")
 		}
-		client.Restart = func() error { return syscall.Exec(executable, os.Args, os.Environ()) }
+		client.Restart = func() error {
+			if err := syscall.Exec(executable, os.Args, os.Environ()); err != nil {
+				return errors.Join(err, updater.RestorePrevious(executable))
+			}
+			return nil
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -161,5 +169,9 @@ func runClient() {
 
 	logger.Info("opennofrp-client starting", "config", *configPath)
 	client.Run(sigCtx)
+	if err := rules.TeardownNetwork(); err != nil {
+		logger.Error("restore original network settings", "error", err)
+		os.Exit(1)
+	}
 	logger.Info("opennofrp-client stopped")
 }

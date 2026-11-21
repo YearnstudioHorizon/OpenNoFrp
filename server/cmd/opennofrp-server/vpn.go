@@ -13,7 +13,7 @@ import (
 	"opennofrp/server/internal/store"
 )
 
-func (s *server) handleVPNConnection(conn net.Conn, raw []byte, sourceIP string) {
+func (s *server) handleVPNConnection(conn net.Conn, raw []byte, sourceIP string, releaseHandshake func()) {
 	conn.SetDeadline(time.Now().Add(15 * time.Second))
 	var request protocol.VPNHandshake
 	fail := func(message string) {
@@ -72,6 +72,7 @@ func (s *server) handleVPNConnection(conn net.Conn, raw []byte, sourceIP string)
 			}
 		}
 	}()
+	releaseHandshake()
 	s.limiter.recordSuccess(sourceIP)
 	s.logger.Info("temporary VPN connected", "lease_id", lease.ID, "client_id", lease.ClientID, "expires_at", lease.ExpiresAt)
 	defer s.logger.Info("temporary VPN disconnected", "lease_id", lease.ID)

@@ -84,7 +84,7 @@ func TestBuiltinCaptchaLogin(t *testing.T) {
 		t.Fatal("captcha replay accepted")
 	}
 	p.mu.Lock()
-	p.captchaChallenges[cookie.Value] = captchaChallenge{Answer: challenge.Answer, Expires: time.Now().Add(-time.Second)}
+	p.captchaChallenges[cookie.Value] = captchaChallenge{Answer: challenge.Answer, Expires: time.Now().Add(-time.Second), IP: challenge.IP}
 	p.mu.Unlock()
 	resp, _ = do(t, "POST", srv.URL+"/login", cookie, credentials)
 	if resp.StatusCode == http.StatusSeeOther {

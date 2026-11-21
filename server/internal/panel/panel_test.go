@@ -7,11 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"opennofrp/server/internal/listener"
 	"opennofrp/server/internal/store"
 )
 
@@ -122,9 +125,94 @@ func TestPanelCSRFAndPersistentSessions(t *testing.T) {
 		t.Errorf("session not persisted across panel restart: %d", resp.StatusCode)
 	}
 
+	if resp, _ := do(t, "POST", srv2.URL+"/logout", cookie, nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("logout without CSRF token = %d, want 403", resp.StatusCode)
+	}
 	// 退出登录后会话失效
 	do(t, "POST", srv2.URL+"/logout", cookie, url.Values{"csrf_token": {csrf}})
 	if resp, _ := do(t, "GET", srv.URL+"/", cookie, nil); resp.StatusCode != http.StatusSeeOther {
 		t.Errorf("session still valid after logout: %d", resp.StatusCode)
+	}
+}
+
+func TestBootstrapRequiresTrustedHTTPS(t *testing.T) {
+	p := &Panel{BaseURL: "https://panel.example.test"}
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/install_client.sh", nil)
+	req.RemoteAddr = "127.0.0.1:15100"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if _, ok := p.bootstrapURL(httptest.NewRecorder(), req); ok {
+		t.Fatal("forwarded scheme accepted from an unconfigured peer")
+	}
+	p.TrustedProxies, _ = listener.ParseTrustedProxies("127.0.0.1/32")
+	base, ok := p.bootstrapURL(httptest.NewRecorder(), req)
+	if !ok || base.Hostname() != "panel.example.test" {
+		t.Fatalf("trusted HTTPS request rejected or wrong origin: %v", base)
+	}
+	p.BaseURL = "http://panel.example.test"
+	if _, ok := p.bootstrapURL(httptest.NewRecorder(), req); ok {
+		t.Fatal("bootstrap accepted a configured plaintext origin")
+	}
+}
+
+func TestClientBootstrapScript(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "onboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p := New(st, slog.Default(), nil, "https://panel.example.test", "", 17000, "SHA256"+strings.Repeat(":AB", 32), "")
+	token, err := st.CreateRegisterToken(context.Background(), "test", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "https://panel.example.test/install_client.sh?token="+token.Token, nil)
+	response := httptest.NewRecorder()
+	p.Handler().ServeHTTP(response, req)
+	script := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(script, "SERVER_HOST='panel.example.test'") ||
+		!strings.Contains(script, "gh attestation verify") {
+		t.Fatal("bootstrap script missed configured host or required release verification")
+	}
+	if bash, err := exec.LookPath("bash"); err == nil {
+		cmd := exec.Command(bash, "-n")
+		cmd.Stdin = strings.NewReader(script)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bootstrap script has invalid shell syntax: %v: %s", err, output)
+		}
+	}
+}
+
+func TestHTTPPanelLoginAndManualOnboarding(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "panel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.CreateAdmin(ctx, "admin", "pass1234"); err != nil {
+		t.Fatal(err)
+	}
+	fp := "SHA256" + strings.Repeat(":AB", 32)
+	p := New(st, slog.Default(), nil, "http://panel.example.test:8080", "", 17000, fp, "")
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	cookie := login(t, srv)
+	if cookie.Secure {
+		t.Fatal("HTTP login issued a Secure cookie")
+	}
+	resp, page := do(t, "GET", srv.URL+"/onboard", cookie, nil)
+	match := csrfRe.FindStringSubmatch(page)
+	if resp.StatusCode != http.StatusOK || match == nil {
+		t.Fatal("onboarding page is unavailable over HTTP")
+	}
+	resp, page = do(t, "POST", srv.URL+"/register-token", cookie, url.Values{"csrf_token": {match[1]}})
+	for _, want := range []string{"[server]", "panel.example.test", "port = 17000", fp, "token = "} {
+		if resp.StatusCode != http.StatusOK || !strings.Contains(page, want) {
+			t.Fatalf("manual config is missing %q (HTTP %d)", want, resp.StatusCode)
+		}
+	}
+	if strings.Contains(page, "/install_client.sh?token=") {
+		t.Fatal("HTTP onboarding returned an executable bootstrap command")
 	}
 }

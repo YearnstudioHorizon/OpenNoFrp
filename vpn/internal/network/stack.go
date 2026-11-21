@@ -91,36 +91,32 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial, d
 		diagnostic("TCP 转发结束：%s，发送到目标=%d 字节，返回本机=%d 字节", flow, observed.readBytes.Load(), observed.writeBytes.Load())
 	})
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tf.HandlePacket)
-	uf := udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
-		var q waiter.Queue
-		endpoint, err := r.CreateEndpoint(&q)
-		if err != nil {
-			return
-		}
-		conn := gonet.NewUDPConn(s, &q, endpoint)
+	uf := udp.NewForwarder(s, func(r *udp.ForwarderRequest) bool {
 		select {
 		case flows <- struct{}{}:
 		default:
-			conn.Close()
-			return
+			return false
 		}
+		port := r.ID().LocalPort
+		var q waiter.Queue
+		endpoint, err := r.CreateEndpoint(&q)
+		if err != nil {
+			<-flows
+			return false
+		}
+		conn := gonet.NewUDPConn(&q, endpoint)
 		go func() {
 			defer func() { conn.Close(); <-flows }()
-			remote, err := dial(ctx, "udp", r.ID().LocalPort)
+			remote, err := dial(ctx, "udp", port)
 			if err != nil {
 				return
 			}
 			defer remote.Close()
 			tempvpn.RelayDatagrams(ctx, conn, remote)
 		}()
+		return true
 	})
-	s.SetTransportProtocolHandler(udp.ProtocolNumber, func(id stack.TransportEndpointID, packet stack.PacketBufferPtr) bool {
-		// The pinned gVisor UDP forwarder retains one packet reference but has
-		// no request-release API. CreateEndpoint consumes it synchronously;
-		// balance that reference when the forwarder returns.
-		defer packet.DecRef()
-		return uf.HandlePacket(id, packet)
-	})
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, uf.HandlePacket)
 	var closeOnce sync.Once
 	closeNetwork := func() { closeOnce.Do(func() { device.Close(); ep.Close() }) }
 	stop := context.AfterFunc(ctx, closeNetwork)
@@ -131,7 +127,7 @@ func Run(ctx context.Context, device tun.Device, target netip.Addr, dial Dial, d
 		var txBuf []byte
 		for {
 			packet := ep.ReadContext(ctx)
-			if packet.IsNil() {
+			if packet == nil {
 				errors <- ctx.Err()
 				return
 			}

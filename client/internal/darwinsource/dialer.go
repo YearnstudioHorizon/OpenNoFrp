@@ -116,7 +116,7 @@ func (d *Dialer) send(ctx context.Context) {
 	buffers := [][]byte{nil}
 	for {
 		packet := d.link.ReadContext(ctx)
-		if packet.IsNil() {
+		if packet == nil {
 			return
 		}
 		view := packet.ToView()

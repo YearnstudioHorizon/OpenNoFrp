@@ -72,15 +72,19 @@ func (c ContainerNetns) nsPath() string {
 // 的 runForwarder：accept 循环本身可以运行在由 RunInNamespace 固定的线程上，但
 // 每一个按连接处理的 goroutine 都必须为自己再次调用 Enter。
 func (c ContainerNetns) RunInNamespace(fn func() error) error {
+	return RunPath(c.nsPath(), fn)
+}
+
+func RunPath(path string, fn func() error) error {
 	hostNS, err := os.Open("/proc/self/ns/net")
 	if err != nil {
 		return fmt.Errorf("netnsworker: open host netns: %w", err)
 	}
 	defer hostNS.Close()
 
-	targetNS, err := os.Open(c.nsPath())
+	targetNS, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("netnsworker: open target netns %s: %w", c.nsPath(), err)
+		return fmt.Errorf("netnsworker: open target netns %s: %w", path, err)
 	}
 	defer targetNS.Close()
 

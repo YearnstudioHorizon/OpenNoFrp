@@ -30,6 +30,7 @@ import (
 	"opennofrp/pkg/protocol"
 	"opennofrp/pkg/updater"
 	"opennofrp/pkg/version"
+	"opennofrp/server/internal/config"
 	"opennofrp/server/internal/listener"
 	"opennofrp/server/internal/store"
 )
@@ -45,6 +46,7 @@ type loginAttempt struct {
 	failedCount int
 	lockedUntil time.Time
 	lastAttempt time.Time
+	inFlight    bool
 }
 
 type Panel struct {
@@ -52,9 +54,9 @@ type Panel struct {
 	Logger  *slog.Logger
 	OnRules OnRulesChanged
 
-	// BaseURL 是从互联网访问面板自身的地址（例如
-	// "http://1.2.3.4:8080"）；为空时回退为请求的 Host 标头。
-	BaseURL string
+	// BaseURL is the configured public HTTP or HTTPS panel origin.
+	BaseURL        string
+	TrustedProxies []*net.IPNet
 	// ControlHost/ControlPort 标识客户端将要连接的控制端点；会被渲染进
 	// 安装命令/脚本中。
 	ControlHost string
@@ -80,10 +82,14 @@ type Panel struct {
 	tmpl *template.Template
 
 	mu                sync.Mutex
+	passwordMu        sync.RWMutex
 	loginAttempts     map[string]*loginAttempt // IP -> 登录失败限速
 	captchaChallenges map[string]captchaChallenge
 	captchaUsed       map[string]time.Time
 	captchaHTTP       *http.Client
+	loginSlots        chan struct{}
+	captchaSlots      chan struct{}
+	migrationSlot     chan struct{}
 }
 
 func New(st *store.Store, logger *slog.Logger, onRules OnRulesChanged, baseURL, controlHost string, controlPort int, fingerprint, clientBinDir string) *Panel {
@@ -113,6 +119,9 @@ func New(st *store.Store, logger *slog.Logger, onRules OnRulesChanged, baseURL, 
 		loginAttempts:     map[string]*loginAttempt{},
 		captchaChallenges: map[string]captchaChallenge{},
 		captchaUsed:       map[string]time.Time{},
+		loginSlots:        make(chan struct{}, 8),
+		captchaSlots:      make(chan struct{}, 8),
+		migrationSlot:     make(chan struct{}, 1),
 		captchaHTTP:       &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 }
@@ -123,7 +132,6 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("GET /login", p.handleLoginGet)
 	mux.HandleFunc("POST /login", p.handleLoginPost)
 	mux.HandleFunc("GET /captcha/image", p.handleCaptchaImage)
-	mux.HandleFunc("POST /logout", p.handleLogout)
 
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +150,7 @@ func (p *Panel) Handler() http.Handler {
 		}
 	}
 
+	mux.HandleFunc("POST /logout", auth(p.handleLogout))
 	mux.HandleFunc("GET /{$}", auth(p.handleIndex))
 	for _, page := range []string{"clients", "onboard", "reserved", "api-tokens", "account"} {
 		mux.HandleFunc("GET /"+page, auth(p.handleWorkspace(page)))
@@ -180,7 +189,19 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("GET /dl/{name}", p.handleDownload)
 	static, _ := fs.Sub(templateFS, "static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(static))))
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		if !strings.HasPrefix(r.URL.Path, "/static/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		if p.secureRequest(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // ---- 认证 -----------------------------------------------------------------
@@ -243,16 +264,19 @@ func checkCSRF(r *http.Request, want string) bool {
 }
 
 // setSessionCookie 创建一个新的持久化会话（含独立的 CSRF 令牌）并下发 Cookie。
-func (p *Panel) setSessionCookie(w http.ResponseWriter, r *http.Request) {
+func (p *Panel) setSessionCookie(w http.ResponseWriter, r *http.Request) bool {
 	tok := randomHex(32)
 	csrf := randomHex(32)
 	if err := p.Store.CreatePanelSession(r.Context(), hashSessionToken(tok), csrf, time.Now().Add(sessionTTL)); err != nil {
 		p.Logger.Error("panel: create session failed", "error", err)
+		http.Error(w, "无法创建会话", http.StatusInternalServerError)
+		return false
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: tok, Path: "/", HttpOnly: true,
-		SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, MaxAge: int(sessionTTL / time.Second),
+		SameSite: http.SameSiteLaxMode, Secure: p.secureRequest(r), MaxAge: int(sessionTTL / time.Second),
 	})
+	return true
 }
 
 func (p *Panel) handleLoginGet(w http.ResponseWriter, r *http.Request) {
@@ -260,24 +284,21 @@ func (p *Panel) handleLoginGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "登录请求无效", http.StatusBadRequest)
+	select {
+	case p.loginSlots <- struct{}{}:
+		defer func() { <-p.loginSlots }()
+	default:
+		http.Error(w, "请稍后重试", http.StatusTooManyRequests)
 		return
 	}
-
-	// 1. 获取客户端来源 IP 进行限速与防爆破防御
-	clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		clientIP = r.RemoteAddr
-	}
+	clientIP := p.requestIP(r)
 
 	p.mu.Lock()
 	now := time.Now()
 	// 定期清理超过 15 分钟未活动的 IP 记录，防止内存泄漏和拒绝服务
 	if len(p.loginAttempts) > 1024 {
 		for ip, att := range p.loginAttempts {
-			if now.Sub(att.lastAttempt) > 15*time.Minute && now.After(att.lockedUntil) {
+			if !att.inFlight && now.Sub(att.lastAttempt) > 15*time.Minute && now.After(att.lockedUntil) {
 				delete(p.loginAttempts, ip)
 			}
 		}
@@ -285,14 +306,18 @@ func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 
 	attempt, ok := p.loginAttempts[clientIP]
 	if !ok {
+		if len(p.loginAttempts) >= 4096 {
+			p.mu.Unlock()
+			http.Error(w, "请稍后重试", http.StatusTooManyRequests)
+			return
+		}
 		attempt = &loginAttempt{}
 		p.loginAttempts[clientIP] = attempt
 	}
 	attempt.lastAttempt = now
-	if now.Before(attempt.lockedUntil) {
+	if attempt.inFlight || now.Before(attempt.lockedUntil) {
 		p.mu.Unlock()
-		w.WriteHeader(http.StatusTooManyRequests)
-		p.renderLogin(w, r, "登录失败次数过多，账号已临时锁定，请 30 秒后再试")
+		http.Error(w, "请稍后重试", http.StatusTooManyRequests)
 		return
 	}
 	// 若前次锁定时间已到，重置失败计数
@@ -300,7 +325,18 @@ func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		attempt.failedCount = 0
 		attempt.lockedUntil = time.Time{}
 	}
+	attempt.inFlight = true
 	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		attempt.inFlight = false
+		p.mu.Unlock()
+	}()
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "登录请求无效", http.StatusBadRequest)
+		return
+	}
 	if err := p.verifyCaptcha(r); err != nil {
 		p.mu.Lock()
 		attempt.lastAttempt = time.Now()
@@ -314,6 +350,8 @@ func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. 校验管理员账密 (store 内部恒定执行一次 bcrypt)
+	p.passwordMu.RLock()
+	defer p.passwordMu.RUnlock()
 	okAuth, err := p.Store.VerifyAdmin(r.Context(), r.FormValue("username"), r.FormValue("password"))
 
 	if err != nil || !okAuth {
@@ -338,7 +376,9 @@ func (p *Panel) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	delete(p.loginAttempts, clientIP)
 	p.mu.Unlock()
 
-	p.setSessionCookie(w, r)
+	if !p.setSessionCookie(w, r) {
+		return
+	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -348,7 +388,7 @@ func (p *Panel) handleLogout(w http.ResponseWriter, r *http.Request) {
 			p.Logger.Warn("panel: delete session failed", "error", err)
 		}
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: r.TLS != nil})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: p.secureRequest(r)})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
@@ -367,6 +407,8 @@ func friendlyMsg(s string) string {
 	switch s {
 	case "":
 		return ""
+	case "control endpoint unavailable":
+		return "请在服务端配置 control_host 或 public_base_url，并确认控制通道的 TLS 指纹可用。"
 	case "invalid credentials":
 		return "用户名或密码错误"
 	case "bad protocol":
@@ -420,7 +462,7 @@ func friendlyMsg(s string) string {
 	case "not found page too large":
 		return "自定义 404 页面过大（上限 64 KB）"
 	case "password too short":
-		return "新密码长度至少 6 位"
+		return "新密码须为 12 到 72 字节"
 	case "invalid current password":
 		return "当前旧密码错误，请重新输入"
 	case "password changed":
@@ -481,7 +523,7 @@ func (p *Panel) workspaceData(r *http.Request, page string) map[string]any {
 	titles := map[string][2]string{
 		"overview":   {"工作空间概览", "查看连接状态，快速进入需要的功能。"},
 		"clients":    {"内网机器", "管理接入的机器，查看连接状态与转发规则。"},
-		"onboard":    {"接入新机器", "生成安装命令，连接你的第一台内网机器。"},
+		"onboard":    {"接入新机器", "生成一次性接入信息，连接你的内网机器。"},
 		"reserved":   {"保留端口", "保护 SSH、面板等服务使用的端口。"},
 		"api-tokens": {"API 令牌", "管理自动化程序的访问凭据。"},
 		"account":    {"账号设置", "管理管理员账号的登录密码。"},
@@ -533,6 +575,13 @@ func (p *Panel) handleWorkspace(page string) http.HandlerFunc {
 }
 
 func (p *Panel) handleCreateToken(w http.ResponseWriter, r *http.Request) {
+	base, _ := config.ParsePublicBaseURL(p.BaseURL)
+	host := p.controlHost(base)
+	fp := strings.TrimSpace(p.Fingerprint)
+	if host == "" || !validFingerprintRegex.MatchString(fp) {
+		p.redirectErr(w, r, "/onboard?err=control+endpoint+unavailable")
+		return
+	}
 	r.ParseForm()
 	ttlMin, _ := strconv.Atoi(r.FormValue("ttl"))
 	if ttlMin <= 0 {
@@ -540,13 +589,18 @@ func (p *Panel) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 	tok, err := p.Store.CreateRegisterToken(r.Context(), r.FormValue("label"), time.Duration(ttlMin)*time.Minute)
 	if err != nil {
-		p.redirectErr(w, r, "/onboard?err="+url.QueryEscape(err.Error()))
+		p.Logger.Error("panel: operation failed", "error", err)
+		p.redirectErr(w, r, "/onboard?err="+url.QueryEscape("internal error"))
 		return
 	}
-	base := p.baseURLOf(r)
-	cmd := fmt.Sprintf("curl -fsSL \"%s/install_client.sh?token=%s&fingerprint=%s\" | sudo bash", base, tok.Token, url.QueryEscape(p.Fingerprint))
 	data := p.workspaceData(r, "onboard")
-	data["NewToken"] = cmd
+	if base != nil && base.Scheme == "https" && p.secureRequest(r) {
+		data["NewToken"] = bootstrapCommand(base.String() + "/install_client.sh?token=" + tok.Token)
+	} else {
+		data["ClientConfig"] = true
+		data["NewToken"] = fmt.Sprintf("[server]\naddr = %q\nport = %d\ntoken = %q\nfingerprint = %q\n",
+			host, p.ControlPort, tok.Token, fp)
+	}
 	p.tmpl.ExecuteTemplate(w, "index.html", data)
 }
 
@@ -985,7 +1039,8 @@ func (p *Panel) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := p.Store.CreateRule(r.Context(), rule); err != nil {
-		p.redirectErr(w, r, "/clients/"+clientID+"/rules/new?err="+url.QueryEscape(err.Error()))
+		p.Logger.Error("panel: operation failed", "error", err)
+		p.redirectErr(w, r, "/clients/"+clientID+"/rules/new?err="+url.QueryEscape("internal error"))
 		return
 	}
 	p.rulesChanged()
@@ -1011,7 +1066,8 @@ func (p *Panel) handleEditRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.Store.UpdateRule(r.Context(), rule); err != nil {
-		p.redirectErr(w, r, fmt.Sprintf("/clients/%s/rules/%d/edit?err=%s", existing.ClientID, id64, url.QueryEscape(err.Error())))
+		p.Logger.Error("panel: operation failed", "error", err)
+		p.redirectErr(w, r, fmt.Sprintf("/clients/%s/rules/%d/edit?err=%s", existing.ClientID, id64, url.QueryEscape("internal error")))
 		return
 	}
 	p.rulesChanged()
@@ -1041,7 +1097,11 @@ func (p *Panel) handleToggleRule(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	p.Store.SetRuleEnabled(r.Context(), id64, !rule.Enabled)
+	if err := p.Store.SetRuleEnabled(r.Context(), id64, !rule.Enabled); err != nil {
+		p.Logger.Warn("panel: cannot toggle rule", "id", id64, "error", err)
+		p.redirectErr(w, r, "/clients/"+rule.ClientID+"?err=rule+toggle+failed")
+		return
+	}
 	p.rulesChanged()
 	http.Redirect(w, r, "/clients/"+rule.ClientID, http.StatusSeeOther)
 }
@@ -1066,7 +1126,12 @@ func (p *Panel) handleAddReserved(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	port, _ := strconv.Atoi(r.FormValue("port"))
 	if port > 0 && port <= 65535 {
-		p.Store.AddReservedPort(r.Context(), uint16(port), r.FormValue("reason"))
+		if err := p.Store.AddReservedPort(r.Context(), uint16(port), r.FormValue("reason")); err != nil {
+			p.Logger.Error("panel: reserve port failed", "error", err)
+			http.Error(w, "保存保留端口失败", http.StatusInternalServerError)
+			return
+		}
+		p.rulesChanged()
 	}
 	http.Redirect(w, r, "/reserved", http.StatusSeeOther)
 }
@@ -1084,11 +1149,13 @@ func (p *Panel) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	curPW := r.FormValue("current_password")
 	newPW := r.FormValue("new_password")
-	if len(newPW) < 6 {
+	if len(newPW) < 12 || len(newPW) > 72 {
 		p.redirectErr(w, r, "/account?err=password+too+short")
 		return
 	}
 
+	p.passwordMu.Lock()
+	defer p.passwordMu.Unlock()
 	// 严格校验原密码
 	ok, err := p.Store.SetAdminPasswordWithOld(r.Context(), curPW, newPW)
 	if err != nil || !ok {
@@ -1096,18 +1163,14 @@ func (p *Panel) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 密码修改成功，轮换并注销所有已有登录 Session（踢出潜在被盗用的其他会话）
-	if err := p.Store.DeleteAllPanelSessions(r.Context()); err != nil {
-		p.Logger.Warn("panel: delete all sessions failed", "error", err)
-	}
-
 	// 为当前改密操作重新发放新 Session Cookie
-	p.setSessionCookie(w, r)
+	if !p.setSessionCookie(w, r) {
+		return
+	}
 	http.Redirect(w, r, "/account?ok=password+changed", http.StatusSeeOther)
 }
 
 var (
-	validHostRegex        = regexp.MustCompile(`^[a-zA-Z0-9.-]+$`)
 	validFingerprintRegex = regexp.MustCompile(`^SHA256(:[0-9A-F]{2}){32}$`)
 	validTokenRegex       = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 )
@@ -1118,6 +1181,10 @@ func escapeShellSingleQuote(s string) string {
 }
 
 func (p *Panel) handleInstallScript(w http.ResponseWriter, r *http.Request) {
+	base, ok := p.bootstrapURL(w, r)
+	if !ok {
+		return
+	}
 	token := r.URL.Query().Get("token")
 	if token == "" || len(token) > 64 || !validTokenRegex.MatchString(token) {
 		http.Error(w, "missing or invalid token format", http.StatusBadRequest)
@@ -1134,14 +1201,10 @@ func (p *Panel) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	// HIGH-1 修复：绝不信任外部 query 传入的 fingerprint 参数，强制使用服务端自身的有效指纹
 	fp := strings.TrimSpace(p.Fingerprint)
 	if !validFingerprintRegex.MatchString(fp) {
-		fp = ""
+		http.Error(w, "control certificate fingerprint unavailable", http.StatusServiceUnavailable)
+		return
 	}
-
-	base := p.baseURLOf(r)
-	host := p.ControlHost
-	if host == "" || host == "0.0.0.0" {
-		host = sanitizeHost(r.Host)
-	}
+	host := p.controlHost(base)
 
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	fmt.Fprintf(w, clientInstallScriptTemplate,
@@ -1149,7 +1212,8 @@ func (p *Panel) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 		p.ControlPort,
 		escapeShellSingleQuote(token),
 		escapeShellSingleQuote(fp),
-		escapeShellSingleQuote(base),
+		escapeShellSingleQuote(base.String()),
+		updater.ReleaseScript,
 	)
 }
 
@@ -1195,34 +1259,60 @@ func (p *Panel) redirectErr(w http.ResponseWriter, r *http.Request, url string) 
 	http.Redirect(w, r, url, http.StatusSeeOther)
 }
 
-func sanitizeHost(raw string) string {
-	h := strings.TrimSpace(raw)
-	if hostPart, _, err := net.SplitHostPort(h); err == nil {
-		h = hostPart
+func (p *Panel) proxyTrusted(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
 	}
-	if !validHostRegex.MatchString(h) {
-		return "127.0.0.1" // 非法字符直接回退到安全的 127.0.0.1
-	}
-	return h
-}
-
-func (p *Panel) baseURLOf(r *http.Request) string {
-	if p.BaseURL != "" {
-		return p.BaseURL
-	}
-	// HIGH-2 修复：严格校验 Host 标头，拦截带特殊字符的恶意请求
-	safeHost := sanitizeHost(r.Host)
-	port := ""
-	if _, portPart, err := net.SplitHostPort(r.Host); err == nil && portPart != "" {
-		if pNum, err := strconv.Atoi(portPart); err == nil && pNum > 0 && pNum <= 65535 {
-			port = ":" + strconv.Itoa(pNum)
+	ip := net.ParseIP(host)
+	for _, network := range p.TrustedProxies {
+		if network.Contains(ip) {
+			return true
 		}
 	}
-	scheme := "http://"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https://"
+	return false
+}
+
+func (p *Panel) secureRequest(r *http.Request) bool {
+	return r.TLS != nil || (p.proxyTrusted(r) && r.Header.Get("X-Forwarded-Proto") == "https")
+}
+
+func (p *Panel) requestIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	return scheme + safeHost + port
+	if p.proxyTrusted(r) {
+		if ip := net.ParseIP(r.Header.Get("X-Real-IP")); ip != nil {
+			return ip.String()
+		}
+	}
+	return host
+}
+
+func (p *Panel) bootstrapURL(w http.ResponseWriter, r *http.Request) (*url.URL, bool) {
+	u, err := config.ParsePublicBaseURL(p.BaseURL)
+	if err != nil || u.Scheme != "https" || !p.secureRequest(r) {
+		http.Error(w, "一键脚本和迁移下载需要 HTTPS，请配置 HTTPS public_base_url", http.StatusForbidden)
+		return nil, false
+	}
+	return u, true
+}
+
+func (p *Panel) controlHost(base *url.URL) string {
+	if p.ControlHost != "" && p.ControlHost != "0.0.0.0" && p.ControlHost != "::" {
+		return p.ControlHost
+	}
+	if base != nil {
+		return base.Hostname()
+	}
+	return ""
+}
+
+func bootstrapCommand(raw string) string {
+	return "(tmp=$(mktemp) && trap 'rm -f -- \"$tmp\"' EXIT && " +
+		"status=$(curl --proto '=https' -fsS --max-filesize 1048576 --max-time 30 -w '%{http_code}' -o \"$tmp\" " +
+		escapeShellSingleQuote(raw) + ") && [ \"$status\" = 200 ] && sudo bash \"$tmp\")"
 }
 
 const clientInstallScriptTemplate = `#!/bin/bash
@@ -1258,109 +1348,14 @@ ARCH="$(detect_arch)"
 ASSET_NAME="opennofrp-client-$PLATFORM-$ARCH"
 echo "[opennofrp] downloading client for $PLATFORM/$ARCH"
 TMP="$(mktemp -d)"
+trap 'rm -rf -- "$TMP"' EXIT
 CLIENT_BIN="$TMP/opennofrp-client"
 
-download_client() {
-  # 1. 尝试从服务端本地 client_bin_dir 托管路径下载
-  if curl -fsSL --connect-timeout 5 -m 60 "$BASE_URL/dl/$ASSET_NAME" -o "$CLIENT_BIN" 2>/dev/null; then
-    echo "[opennofrp] downloaded from server local storage ($BASE_URL/dl)"
-    return 0
-  fi
+%s
 
-  echo "[opennofrp] local server binary not found, falling back to GitHub Releases..."
-
-  REPO="YearnstudioHorizon/OpenNoFrp"
-  MIRROR_PREFIX="https://mirror.yearnstudio.cn/"
-
-  safe_curl_get() {
-    local url="$1"
-    local timeout="${2:-10}"
-    curl -4 -s --connect-timeout 6 -m "$timeout" "$url" 2>/dev/null || curl -s --connect-timeout 6 -m "$timeout" "$url" 2>/dev/null
-  }
-
-  safe_curl_download() {
-    local url="$1"
-    local dest="$2"
-    local timeout="${3:-120}"
-    if curl -4 -fsSL --connect-timeout 15 -m "$timeout" --retry 2 --retry-delay 1 "$url" -o "$dest" 2>/dev/null; then
-      return 0
-    fi
-    if curl -fsSL --connect-timeout 15 -m "$timeout" "$url" -o "$dest" 2>/dev/null; then
-      return 0
-    fi
-    return 1
-  }
-
-  get_latest_tag() {
-    local tag=""
-    local loc
-    loc=$(curl -4 -sI --connect-timeout 6 -m 8 "https://github.com/$REPO/releases/latest" 2>/dev/null | grep -i "^location:" | tr -d "\r\n" || true)
-    if [ -z "$loc" ]; then
-      loc=$(curl -sI --connect-timeout 6 -m 8 "https://github.com/$REPO/releases/latest" 2>/dev/null | grep -i "^location:" | tr -d "\r\n" || true)
-    fi
-    if [ -n "$loc" ]; then
-      tag=$(echo "$loc" | awk -F"/tag/" '{print $2}' | tr -d " \r\n")
-    fi
-    if [ -z "$tag" ]; then
-      tag=$(safe_curl_get "https://api.github.com/repos/$REPO/releases/latest" 8 | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
-    fi
-    if [ -z "$tag" ]; then
-      tag=$(safe_curl_get "${MIRROR_PREFIX}https://api.github.com/repos/$REPO/releases/latest" 10 | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || true)
-    fi
-    echo "$tag"
-  }
-
-  TAG="$(get_latest_tag)"
-
-  if [ -n "$TAG" ]; then
-    GH_URL="https://github.com/$REPO/releases/download/$TAG/$ASSET_NAME"
-    MIRROR_URL="${MIRROR_PREFIX}${GH_URL}"
-
-    # 2. 尝试从 GitHub 官方下载 (超时限制 8 秒)
-    if safe_curl_download "$GH_URL" "$CLIENT_BIN" 120; then
-      echo "[opennofrp] downloaded from GitHub Releases ($TAG)"
-      return 0
-    fi
-
-    # 3. GitHub 直连超时或受限，自动切换至 mirror.yearnstudio.cn 镜像加速 (优先 IPv4 规避 Cloudflare IPv6 握手黑洞)
-    echo "[opennofrp] GitHub direct download timed out, switching to mirror accelerator ($MIRROR_PREFIX)..."
-    if safe_curl_download "$MIRROR_URL" "$CLIENT_BIN" 180; then
-      echo "[opennofrp] downloaded via YearnStudio mirror accelerator ($TAG)"
-      return 0
-    fi
-  else
-    GH_LATEST="https://github.com/$REPO/releases/latest/download/$ASSET_NAME"
-    if safe_curl_download "$GH_LATEST" "$CLIENT_BIN" 120; then
-      echo "[opennofrp] downloaded from GitHub Releases"
-      return 0
-    fi
-  fi
-
-  echo "[opennofrp] ERROR: could not download client binary from server, GitHub, or mirror!" >&2
-  exit 1
-}
-
-download_client
-chmod +x "$CLIENT_BIN"
-
-# 完整性安全校验：防止网络中间人劫持/篡改或返回 HTML 错误页面
-if [ ! -s "$CLIENT_BIN" ]; then
-  echo "[opennofrp] ERROR: downloaded client binary is empty!" >&2
-  exit 1
-fi
-MAGIC=$(head -c 4 "$CLIENT_BIN" 2>/dev/null || true)
-if [ "$MAGIC" != $'\x7fELF' ] && [ "$PLATFORM" != "darwin" ]; then
-  echo "[opennofrp] ERROR: downloaded client file is not a valid Linux ELF executable! (possible network tampering)" >&2
-  exit 1
-fi
-if [ "$PLATFORM" = "darwin" ]; then
-  # macOS Mach-O 魔数：0cffeedf (64位) 或 cefaedfe (字节交换)
-  MAGIC_HEX=$(head -c 4 "$CLIENT_BIN" | od -An -tx1 | tr -d ' \n')
-  case "$MAGIC_HEX" in
-    cffaedfe|0cffeedf|cafebabe) ;;
-    *) echo "[opennofrp] ERROR: downloaded client file is not a valid macOS Mach-O executable! (possible network tampering)" >&2; exit 1 ;;
-  esac
-fi
+release_metadata "$TMP"
+download_release_asset "$ASSET_NAME" "$CLIENT_BIN" "$BASE_URL/dl/$ASSET_NAME"
+chmod 0755 "$CLIENT_BIN"
 
 write_client_config() {
   cat > "$1" <<EOF
@@ -1380,21 +1375,28 @@ EOF
 }
 
 if [ "$PLATFORM" = "linux" ]; then
-  mkdir -p /opt/opennofrp /etc/opennofrp /var/lib/opennofrp
+  if systemctl show -p ExecStart --value opennofrp-client.service 2>/dev/null | grep -Fq '/opt/opennofrp/opennofrp-client'; then
+    echo "Legacy client installation detected. Follow the upgrade notes before installing." >&2
+    exit 1
+  fi
+  for dir in /opt/opennofrp-client /etc/opennofrp-client /var/lib/opennofrp-client; do
+    if [ -L "$dir" ]; then echo "Refusing symlink: $dir" >&2; exit 1; fi
+    install -d -o root -g root -m 0700 "$dir"
+  done
   if systemctl is-active --quiet opennofrp-client 2>/dev/null; then
     echo "[opennofrp] stopping running client service before upgrade..."
     systemctl stop opennofrp-client || true
   fi
-  install -m 0755 "$CLIENT_BIN" /opt/opennofrp/opennofrp-client
+  install -m 0755 "$CLIENT_BIN" /opt/opennofrp-client/opennofrp-client
 
   if [ -n "$TOKEN" ]; then
     echo "[opennofrp] applying new registration token and updating client configuration..."
-    rm -f /etc/opennofrp/client_credentials.toml
-    write_client_config /etc/opennofrp/client.toml
-  elif [ ! -f /etc/opennofrp/client.toml ]; then
-    write_client_config /etc/opennofrp/client.toml
+    rm -f /etc/opennofrp-client/client_credentials.toml
+    write_client_config /etc/opennofrp-client/client.toml
+  elif [ ! -f /etc/opennofrp-client/client.toml ]; then
+    write_client_config /etc/opennofrp-client/client.toml
   else
-    echo "[opennofrp] existing /etc/opennofrp/client.toml kept (config preserved)"
+    echo "[opennofrp] existing /etc/opennofrp-client/client.toml kept (config preserved)"
   fi
 
   cat > /etc/systemd/system/opennofrp-client.service <<UNIT
@@ -1405,7 +1407,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/opennofrp/opennofrp-client -c /etc/opennofrp/client.toml -state-dir /var/lib/opennofrp
+ExecStart=/opt/opennofrp-client/opennofrp-client -c /etc/opennofrp-client/client.toml -state-dir /var/lib/opennofrp-client
+ExecStopPost=/opt/opennofrp-client/opennofrp-client tproxy-teardown -state-dir /var/lib/opennofrp-client
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 Restart=on-failure
 RestartSec=2
@@ -1420,7 +1423,8 @@ else
   # macOS: /Library/Application Support 布局 + launchd 系统级守护
   APP_DIR="/Library/Application Support/OpenNoFrp"
   PLIST="/Library/LaunchDaemons/org.opennofrp.client.plist"
-  mkdir -p "$APP_DIR"
+  if [ -L "$APP_DIR" ]; then echo "Refusing symlink: $APP_DIR" >&2; exit 1; fi
+  install -d -o root -g wheel -m 0700 "$APP_DIR"
   if launchctl list org.opennofrp.client >/dev/null 2>&1; then
     echo "[opennofrp] stopping running client service before upgrade..."
     launchctl bootout system/org.opennofrp.client 2>/dev/null || launchctl remove org.opennofrp.client 2>/dev/null || true
@@ -1469,7 +1473,7 @@ UNIT
 
   launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load -w "$PLIST"
   echo "[opennofrp] client installed and started (launchd: org.opennofrp.client)"
-  echo "[opennofrp] note: macOS 版本暂不支持保留访问者源 IP，相关规则将以普通转发方式运行"
+  echo "[opennofrp] note: macOS 支持 IPv4 回环后端的 IPv4 来源地址保留，需启用默认 PF 锚点"
   echo "[opennofrp] watch: tail -f \"$APP_DIR/opennofrp-client.log\""
   exit 0
 fi

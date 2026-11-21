@@ -41,7 +41,7 @@
   <section class="card"><h2>下一步，想做什么？</h2><p class="desc">从需要的功能开始，每个页面只处理一件事。</p>
     <div class="quick-links">
       <a href="/clients"><span class="quick-icon">▤</span><strong>管理内网机器</strong><span>查看机器状态，管理隧道与转发规则。</span><b>查看机器 →</b></a>
-      <a href="/onboard"><span class="quick-icon">＋</span><strong>接入一台新机器</strong><span>生成安装命令，连接你的内网服务。</span><b>开始接入 →</b></a>
+      <a href="/onboard"><span class="quick-icon">＋</span><strong>接入一台新机器</strong><span>生成一次性接入信息，连接你的内网服务。</span><b>开始接入 →</b></a>
       <a href="/api-tokens"><span class="quick-icon">⌘</span><strong>配置自动化访问</strong><span>创建 API 令牌，连接部署脚本与工具。</span><b>管理令牌 →</b></a>
     </div>
   </section>
@@ -80,7 +80,7 @@
 
   {{if eq .Page "onboard"}}<section class="card" id="onboard">
     <h2>接入新机器</h2>
-    <p class="desc">生成一条一次性安装命令，在目标内网机器（Linux / macOS）上执行即可完成注册（令牌只能使用一次）。</p>
+    <p class="desc">为 Linux 或 macOS 客户端生成一次性接入信息。</p>
     <form method="post" action="/register-token"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <div class="form-grid">
         <div class="field">
@@ -93,14 +93,14 @@
         </div>
         <div class="field span-all" style="max-width:220px">
           <label>&nbsp;</label>
-          <button class="btn btn-primary" type="submit">生成安装命令</button>
+          <button class="btn btn-primary" type="submit">生成接入信息</button>
         </div>
       </div>
     </form>
 
     {{if .NewToken}}
     <div style="margin-top:18px">
-      <p class="desc" style="margin-bottom:8px">一次性安装命令 — 请立即复制保存，令牌仅可使用一次：</p>
+      <p class="desc" style="margin-bottom:8px">{{if .ClientConfig}}将配置保存为客户端的 client.toml，然后用已安装的客户端启动注册。令牌仅可使用一次。{{else}}一次性安装命令，令牌仅可使用一次。{{end}}</p>
       <div class="code-block">
         <pre id="installcmd" tabindex="0">{{.NewToken}}</pre>
         <button class="btn btn-sm copy" type="button" data-copy-target="#installcmd">复制</button>
@@ -189,11 +189,11 @@
   {{if eq .Page "account"}}
   <section class="card" id="account">
     <h2>修改管理员密码</h2>
-    <p class="desc">为了账号安全，修改密码需要输入当前密码，且新密码长度至少 6 位。</p>
+    <p class="desc">为了账号安全，修改密码需要输入当前密码，且新密码须为 12 到 72 字节。</p>
     <form method="post" action="/admin/password" style="max-width:340px"><input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <div class="field">
         <label for="current-password">当前密码</label><input id="current-password" name="current_password" type="password" placeholder="输入当前密码" autocomplete="current-password" required>
-        <label for="new-password">新密码</label><input id="new-password" name="new_password" type="password" placeholder="至少 6 位" minlength="6" autocomplete="new-password" required>
+        <label for="new-password">新密码</label><input id="new-password" name="new_password" type="password" placeholder="至少 12 位" minlength="12" autocomplete="new-password" required>
       </div>
       <div class="form-actions"><button class="btn btn-primary" type="submit">保存密码</button></div>
     </form>

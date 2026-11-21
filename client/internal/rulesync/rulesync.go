@@ -25,12 +25,14 @@ import (
 
 // Reconciler 保存最新的规则快照以及每条规则的运行时状态。
 type Reconciler struct {
-	Logger   *slog.Logger
-	StateDir string
+	StrictSourceIP bool
+	Logger         *slog.Logger
+	StateDir       string
 
 	mu            sync.RWMutex
 	rules         map[uint32]protocol.Rule
-	preparedNetns map[int]bool // 容器 PID -> 其 netns 是否已配置 sysctls+路由（仅 Linux 使用）
+	preparedNetns map[string]bool // Network namespace IDs (Linux).
+	stopping      bool
 	hostSetupDone bool
 	source        platformSource
 }
@@ -40,7 +42,7 @@ func New(logger *slog.Logger, stateDir string) *Reconciler {
 		Logger:        logger,
 		StateDir:      stateDir,
 		rules:         make(map[uint32]protocol.Rule),
-		preparedNetns: make(map[int]bool),
+		preparedNetns: make(map[string]bool),
 	}
 }
 
@@ -157,6 +159,10 @@ func (r *Reconciler) serveTCP(ctx context.Context, rule protocol.Rule, meta prot
 		return
 	}
 	if upstream == nil {
+		if r.StrictSourceIP {
+			r.Logger.Warn("source IP preservation unavailable", "rule", rule.Name)
+			return
+		}
 		r.relayPlain(ctx, rule, meta, stream, target)
 		return
 	}
@@ -188,6 +194,11 @@ func (r *Reconciler) serveUDP(ctx context.Context, rule protocol.Rule, meta prot
 			upstream = c
 		}
 	}
+	if upstream == nil && rule.PreserveSourceIP && r.StrictSourceIP {
+		r.Logger.Warn("UDP source IP preservation unavailable", "rule", rule.Name)
+		return
+	}
+
 	if upstream == nil {
 		c, err := net.Dial("udp", target)
 		if err != nil {

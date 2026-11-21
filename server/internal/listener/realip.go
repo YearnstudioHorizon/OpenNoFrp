@@ -9,7 +9,7 @@ package listener
 //     （PreserveSourceIP 开启时），后端在 TCP 层看到的就是真实访问者 IP；
 //   - 写入转发给后端的 X-Real-IP / X-Forwarded-For / Forwarded 等请求头。
 //
-// 安全：若配置了 TrustedProxies 而 TCP 对端不在其中，则完全忽略请求头里的 IP
+// 安全：若 TCP 对端不在 TrustedProxies 中，则完全忽略请求头里的 IP
 // （防止访问者伪造 X-Forwarded-For），并剥离入站的这些头。
 
 import (
@@ -109,9 +109,6 @@ func ipInNets(ip net.IP, nets []*net.IPNet) bool {
 
 // headersTrusted 报告是否可以信任来自 peer 的请求头中的 IP。
 func headersTrusted(peer net.IP, trusted []*net.IPNet) bool {
-	if len(trusted) == 0 {
-		return true
-	}
 	return peer != nil && ipInNets(peer, trusted)
 }
 

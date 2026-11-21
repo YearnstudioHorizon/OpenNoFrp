@@ -13,6 +13,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"golang.org/x/net/netutil"
 
 	"opennofrp/pkg/crypto/tlsutil"
 	"opennofrp/pkg/protocol"
@@ -41,7 +43,7 @@ import (
 	"opennofrp/server/internal/store"
 )
 
-const defaultConfigPath = "/etc/opennofrp/server.toml"
+const defaultConfigPath = "/etc/opennofrp-server/server.toml"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -117,6 +119,12 @@ func runServer() {
 		os.Exit(1)
 	}
 
+	proxies, bad := listener.ParseTrustedProxies(cfg.Server.PanelTrustedProxies)
+	if len(bad) != 0 {
+		logger.Error("invalid server.panel_trusted_proxies", "entries", bad)
+		os.Exit(1)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -165,14 +173,14 @@ func runServer() {
 	}
 	logger.Info("server TLS certificate ready", "fingerprint", fingerprint, "cert_path", cfg.Server.TLSCertPath)
 
-	controlAddr := fmt.Sprintf("%s:%d", cfg.Server.BindAddr, cfg.Server.ControlPort)
+	controlAddr := net.JoinHostPort(cfg.Server.BindAddr, strconv.Itoa(cfg.Server.ControlPort))
 	rawLn, err := net.Listen("tcp", controlAddr)
 	if err != nil {
 		logger.Error("failed to listen on control port", "addr", controlAddr, "error", err)
 		os.Exit(1)
 	}
 	tlsConfig := tlsutil.NewServerTLSConfig(tlsCert)
-	ln := tls.NewListener(rawLn, tlsConfig)
+	ln := tls.NewListener(netutil.LimitListener(rawLn, 512), tlsConfig)
 	logger.Info("opennofrp-server listening (TLS encrypted)", "control_addr", controlAddr)
 	go func() {
 		<-ctx.Done()
@@ -182,7 +190,8 @@ func runServer() {
 
 	// 管理面板。
 	p := panel.New(st, logger, s.onAnyRuleChanged, cfg.Server.PublicBaseURL,
-		hostFromAddr(cfg.Server.BindAddr), cfg.Server.ControlPort, fingerprint, cfg.Server.ClientBinDir)
+		cfg.Server.ControlHost, cfg.Server.ControlPort, fingerprint, cfg.Server.ClientBinDir)
+	p.TrustedProxies = proxies
 	p.ClientStatus = func(clientID string) (bool, string, []string) {
 		sess := s.sessionFor(clientID)
 		if sess == nil {
@@ -194,19 +203,33 @@ func runServer() {
 	p.RuleStats = s.listener.Stats
 	p.MetricsToken = cfg.Server.MetricsToken
 	p.MigrationPaths = &panel.MigrationPaths{
-		ConfigFile: configPath,
-		DBPath:     cfg.Server.DBPath,
-		TLSCert:    cfg.Server.TLSCertPath,
-		TLSKey:     cfg.Server.TLSKeyPath,
-		ACMEDir:    cfg.Server.ACMECacheDir,
-		DataDir:    filepath.Dir(cfg.Server.DBPath),
+		ConfigFile:   configPath,
+		DBPath:       cfg.Server.DBPath,
+		TLSCert:      cfg.Server.TLSCertPath,
+		TLSKey:       cfg.Server.TLSKeyPath,
+		PanelTLSCert: cfg.Server.PanelTLSCert,
+		PanelTLSKey:  cfg.Server.PanelTLSKey,
+		ACMEDir:      cfg.Server.ACMECacheDir,
+		DataDir:      filepath.Dir(cfg.Server.DBPath),
 	}
-	panelAddr := fmt.Sprintf("%s:%d", cfg.Server.PanelAddr, cfg.Server.PanelPort)
-	httpSrv := &http.Server{Addr: panelAddr, Handler: p.Handler()}
+	panelAddr := net.JoinHostPort(cfg.Server.PanelAddr, strconv.Itoa(cfg.Server.PanelPort))
+	panelLn, err := net.Listen("tcp", panelAddr)
+	if err != nil {
+		logger.Error("failed to listen on panel port", "error", err)
+		os.Exit(1)
+	}
+	bounded := netutil.LimitListener(panelLn, 128)
+	httpSrv := &http.Server{
+		Addr: panelAddr, Handler: p.Handler(),
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10,
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
 	go func() {
 		<-ctx.Done()
-		httpSrv.Shutdown(context.Background())
+		httpSrv.Close()
 	}()
+
 	// 定期清理过期的面板登录会话。
 	go func() {
 		t := time.NewTicker(time.Hour)
@@ -226,14 +249,14 @@ func runServer() {
 		var err error
 		if cfg.Server.PanelTLSCert != "" && cfg.Server.PanelTLSKey != "" {
 			logger.Info("admin panel serving (HTTPS)", "addr", panelAddr)
-			httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-			err = httpSrv.ListenAndServeTLS(cfg.Server.PanelTLSCert, cfg.Server.PanelTLSKey)
+			err = httpSrv.ServeTLS(bounded, cfg.Server.PanelTLSCert, cfg.Server.PanelTLSKey)
 		} else {
 			logger.Info("admin panel serving", "addr", panelAddr)
-			err = httpSrv.ListenAndServe()
+			err = httpSrv.Serve(bounded)
 		}
 		if err != nil && err != http.ErrServerClosed {
 			logger.Error("panel http server failed", "error", err)
+			stop()
 		}
 	}()
 
@@ -296,6 +319,10 @@ func (s *server) onAnyRuleChanged() {
 	s.mu.Unlock()
 
 	for _, sess := range sessions {
+		if _, err := s.store.GetClient(ctx, sess.ClientID); err != nil {
+			sess.Yamux.Close()
+			continue
+		}
 		rules, err := s.store.ListEnabledRulesForClient(ctx, sess.ClientID)
 		if err != nil {
 			s.logger.Warn("failed to load rules for client", "client_id", sess.ClientID, "error", err)
@@ -376,50 +403,68 @@ func (s *server) handleControlConn(conn net.Conn) {
 	}
 	defer release()
 
-	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	conn.SetDeadline(time.Now().Add(15 * time.Second))
 	first, err := readControlMessage(conn)
 	if err != nil {
+		s.limiter.recordFailure(ip)
 		s.logger.Warn("first control message read failed", "remote", conn.RemoteAddr(), "error", err)
 		return
 	}
 	if first.Type == protocol.MsgVPNHandshake {
-		s.handleVPNConnection(conn, first.raw, ip)
+		s.handleVPNConnection(conn, first.raw, ip, release)
 		return
 	}
 
 	// 第一条消息要么是一次性注册（此时尚无凭据），要么是常规握手。
 	if first.Type == protocol.MsgRegisterRequest {
-		if _, err := s.handleRegister(conn, first, conn.RemoteAddr()); err != nil {
-			return // handleRegister 已经写回了错误响应
+		if !s.limiter.acquireAuth() {
+			return
+		}
+		_, err := s.handleRegister(conn, first, conn.RemoteAddr())
+		s.limiter.releaseAuth()
+		if err != nil {
+			s.limiter.recordFailure(ip)
+			return
 		}
 		// 注册完成后，客户端会在同一条 TCP 连接上以第二条消息发送真正的握手。
-		conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+		conn.SetDeadline(time.Now().Add(15 * time.Second))
 		second, err := readControlMessage(conn)
 		if err != nil || second.Type != protocol.MsgHandshakeRequest {
+			s.limiter.recordFailure(ip)
 			s.logger.Warn("expected handshake after registration", "error", err)
 			return
 		}
 		first = second
 	}
-	conn.SetReadDeadline(time.Time{})
 
 	if first.Type != protocol.MsgHandshakeRequest {
+		s.limiter.recordFailure(ip)
 		s.logger.Warn("first message is neither register nor handshake", "type", first.Type)
 		return
 	}
 
 	var req protocol.HandshakeRequest
 	if err := json.Unmarshal(first.raw, &req); err != nil {
+		s.limiter.recordFailure(ip)
 		return
 	}
-	if err := s.validateHandshake(req); err != nil {
+	if !s.limiter.acquireAuth() {
+		return
+	}
+	authErr := s.validateHandshake(req)
+	s.limiter.releaseAuth()
+	if err := authErr; err != nil {
 		s.logger.Warn("handshake rejected", "remote", conn.RemoteAddr(), "error", err)
 		banned := s.limiter.recordFailure(ip)
 		if banned {
 			s.logger.Warn("ip banned from control port due to repeated handshake failures", "ip", ip)
 		}
+		message := "authentication unavailable"
+		if errors.Is(err, errClientCredentials) || errors.Is(err, errControlProtocol) {
+			message = err.Error()
+		}
 		protocol.WriteJSONMessage(conn, protocol.HandshakeResponse{
-			Type: protocol.MsgHandshakeResponse, OK: false, Error: err.Error(),
+			Type: protocol.MsgHandshakeResponse, OK: false, Error: message,
 		})
 		return
 	}
@@ -432,6 +477,7 @@ func (s *server) handleControlConn(conn net.Conn) {
 		}); err != nil {
 			return nil, err
 		}
+		conn.SetDeadline(time.Time{})
 		return yamux.Server(conn, protocol.TunnelYamuxConfig())
 	}()
 	if err != nil {
@@ -442,10 +488,13 @@ func (s *server) handleControlConn(conn net.Conn) {
 
 	// Client 在 yamux 启动后会立即打开其控制流；在此处接受它（这是唯一一条
 	// 由 Client 打开的流）。
-	ctrlStream, err := ym.AcceptStream()
+	handshakeCtx, cancelHandshake := context.WithTimeout(context.Background(), 15*time.Second)
+	ctrlStream, err := ym.AcceptStreamWithContext(handshakeCtx)
+	cancelHandshake()
 	if err != nil {
 		return
 	}
+	release()
 
 	sess := session.New(newSessionID(), req.ClientID, ym, s.logger, ctrlStream)
 	sess.ClientVersion = req.ClientVersion
@@ -453,6 +502,11 @@ func (s *server) handleControlConn(conn net.Conn) {
 	if !sess.HasCapability(protocol.CapDialAck) {
 		s.logger.Warn("client does not support dial_ack; HTTP/TLS rules for it will return the unavailable page until it is upgraded",
 			"client_id", req.ClientID, "client_version", req.ClientVersion)
+	}
+	s.rulesMu.Lock()
+	if _, err := s.store.GetClient(context.Background(), req.ClientID); err != nil {
+		s.rulesMu.Unlock()
+		return
 	}
 	s.registerSession(sess)
 	defer s.unregisterSession(sess)
@@ -471,19 +525,15 @@ func (s *server) handleControlConn(conn net.Conn) {
 		}
 	}
 
+	s.rulesMu.Unlock()
 	s.logger.Info("client session established", "client_id", req.ClientID, "remote", conn.RemoteAddr())
 
-	// Client 负责接受由服务端打开的流；Server 为每条公网连接各打开一条流。
-	// 这里已没有更多内容需要读取——阻塞直到会话结束，以便执行
-	// handleControlConn 中 defer 的清理逻辑。
-	for {
-		// Client 不会打开额外的流；一旦它这样做（或会话终止），AcceptStream
-		// 就会返回/报错，此时执行 defer 的清理逻辑。每条连接对应的流改由
-		// 服务端（监听器路径）打开。
-		if _, err := ym.AcceptStream(); err != nil {
-			return
-		}
+	// The peer is only allowed to initiate its control stream. End the session
+	// on a protocol violation so neither that stream nor any queued streams leak.
+	if extra, err := ym.AcceptStream(); err == nil {
+		extra.Close()
 	}
+
 }
 
 // watchControlStream 读取控制流上 client->server 方向的心跳帧，并在心跳
@@ -516,11 +566,16 @@ func (s *server) watchControlStream(sess *session.Session, ym *yamux.Session, ct
 	}
 }
 
+var (
+	errClientCredentials = errors.New("invalid client credentials")
+	errControlProtocol   = errors.New("incompatible control protocol")
+)
+
 func (s *server) validateHandshake(req protocol.HandshakeRequest) error {
 	if req.ProtocolVersion != protocol.ProtocolVersion {
-		return fmt.Errorf("protocol version mismatch: client=%d server=%d", req.ProtocolVersion, protocol.ProtocolVersion)
+		return errControlProtocol
 	}
-	if len(req.ClientID) == 0 || len(req.ClientSecret) == 0 {
+	if len(req.ClientID) == 0 || len(req.ClientSecret) == 0 || len(req.ClientSecret) > 72 {
 		return fmt.Errorf("missing client credentials")
 	}
 	// 客户端 ID 格式轻量校验（16 位 16 进制字符），防畸形探测输入与无谓计算
@@ -537,7 +592,7 @@ func (s *server) validateHandshake(req protocol.HandshakeRequest) error {
 		return fmt.Errorf("verify client: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("invalid client credentials")
+		return errClientCredentials
 	}
 	return nil
 }
@@ -549,37 +604,29 @@ func (s *server) handleRegister(conn net.Conn, first *controlMsg, remote net.Add
 	if err := json.Unmarshal(first.raw, &req); err != nil {
 		return "", err
 	}
+	if req.ProtocolVersion != protocol.ProtocolVersion {
+		protocol.WriteJSONMessage(conn, protocol.RegisterResponse{Type: protocol.MsgRegisterResponse, Error: errControlProtocol.Error()})
+		return "", errControlProtocol
+	}
+
 	name := "unnamed"
 	if req.Hostname != "" {
 		name = req.Hostname
 	}
-	// 在签发用户之前先消费令牌，以防止 TOCTOU 重放：令牌与该令牌字符串绑定，
-	// 而 CreateClient 无论如何都需要一个名称；client 行的名称使用消费之后
-	// 取得的注册时标签。更简单的顺序是：先签发 client，再按“仅校验一次”的
-	// 语义消费令牌……但后消费的话，令牌无效时会遗留一条 client 行。先消费：
-	// 令牌行的标签可以提供名称。可没有 client id 就无法消费……所以：先通过
-	// 一次读取校验令牌存在且未过期，再签发 client，然后原子地消费并标记
-	// consumed_by。为保持简单且正确，曾考虑用占位 client id "" 消费后再更新
-	// ——但这不受支持。改为：在一个事务中带 id 消费：先 CreateClient，再
-	// ConsumeRegisterToken；若消费失败，则删除刚创建的 client 行。
-	clientID, clientSecret, err := s.store.CreateClient(context.Background(), name)
+	if len(name) > 255 {
+		name = name[:255]
+	}
+	clientID, clientSecret, err := s.store.RegisterClient(context.Background(), req.RegisterToken, name)
 	if err != nil {
-		protocol.WriteJSONMessage(conn, protocol.RegisterResponse{Type: protocol.MsgRegisterResponse, OK: false, Error: err.Error()})
+		protocol.WriteJSONMessage(conn, protocol.RegisterResponse{Type: protocol.MsgRegisterResponse, Error: "registration rejected"})
 		return "", err
 	}
-	label, err := s.store.ConsumeRegisterToken(context.Background(), req.RegisterToken, clientID)
-	if err != nil {
-		s.store.DeleteClient(context.Background(), clientID)
-		protocol.WriteJSONMessage(conn, protocol.RegisterResponse{Type: protocol.MsgRegisterResponse, OK: false, Error: err.Error()})
-		return "", err
-	}
-	if label != "" {
-		s.store.RenameClient(context.Background(), clientID, label)
-	}
-	protocol.WriteJSONMessage(conn, protocol.RegisterResponse{
+	if err := protocol.WriteJSONMessage(conn, protocol.RegisterResponse{
 		Type: protocol.MsgRegisterResponse, OK: true, ClientID: clientID, ClientSecret: clientSecret,
-	})
-	s.logger.Info("registered new client", "client_id", clientID, "name", label, "remote", remote)
+	}); err != nil {
+		return "", err
+	}
+	s.logger.Info("registered new client", "client_id", clientID, "remote", remote)
 	return clientID, nil
 }
 
@@ -692,6 +739,9 @@ func ensureAdminSeeded(ctx context.Context, st *store.Store, cfg *config.Config,
 // handshakeLimiter 负责控制端口的连接级限速、单 IP 并发控制与防爆破 CPU DoS 封禁 (MEDIUM-2 防御)
 type handshakeLimiter struct {
 	mu            sync.Mutex
+	inFlight      int
+	authSlots     chan struct{}
+	nextSweep     time.Time
 	inFlightPerIP map[string]int       // ip -> 当前并发握手数
 	failuresPerIP map[string]failInfo  // ip -> 连续失败记录
 	bannedUntil   map[string]time.Time // ip -> 封禁截止时间
@@ -705,6 +755,7 @@ type failInfo struct {
 func newHandshakeLimiter() *handshakeLimiter {
 	return &handshakeLimiter{
 		inFlightPerIP: make(map[string]int),
+		authSlots:     make(chan struct{}, 4),
 		failuresPerIP: make(map[string]failInfo),
 		bannedUntil:   make(map[string]time.Time),
 	}
@@ -717,11 +768,35 @@ const (
 	banDuration      = 5 * time.Minute // 触发封禁后的时长
 )
 
+func (hl *handshakeLimiter) acquireAuth() bool {
+	select {
+	case hl.authSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (hl *handshakeLimiter) releaseAuth() { <-hl.authSlots }
+
 func (hl *handshakeLimiter) checkAndAcquire(ip string) (func(), bool) {
 	hl.mu.Lock()
 	defer hl.mu.Unlock()
 
 	now := time.Now()
+	if now.After(hl.nextSweep) {
+		for source, info := range hl.failuresPerIP {
+			if now.Sub(info.firstFail) > failWindow {
+				delete(hl.failuresPerIP, source)
+			}
+		}
+		for source, until := range hl.bannedUntil {
+			if now.After(until) {
+				delete(hl.bannedUntil, source)
+			}
+		}
+		hl.nextSweep = now.Add(time.Minute)
+	}
 	// 清理过期的封禁记录
 	if until, exists := hl.bannedUntil[ip]; exists {
 		if now.After(until) {
@@ -732,18 +807,23 @@ func (hl *handshakeLimiter) checkAndAcquire(ip string) (func(), bool) {
 	}
 
 	// 检查单 IP 并发上限，防止并发连接打满 CPU
-	if hl.inFlightPerIP[ip] >= maxInFlightPerIP {
+	if hl.inFlight >= 128 || hl.inFlightPerIP[ip] >= maxInFlightPerIP {
 		return nil, false
 	}
 
+	hl.inFlight++
 	hl.inFlightPerIP[ip]++
+	var once sync.Once
 	release := func() {
-		hl.mu.Lock()
-		hl.inFlightPerIP[ip]--
-		if hl.inFlightPerIP[ip] <= 0 {
-			delete(hl.inFlightPerIP, ip)
-		}
-		hl.mu.Unlock()
+		once.Do(func() {
+			hl.mu.Lock()
+			hl.inFlight--
+			hl.inFlightPerIP[ip]--
+			if hl.inFlightPerIP[ip] <= 0 {
+				delete(hl.inFlightPerIP, ip)
+			}
+			hl.mu.Unlock()
+		})
 	}
 	return release, true
 }
@@ -753,6 +833,11 @@ func (hl *handshakeLimiter) recordFailure(ip string) bool {
 	defer hl.mu.Unlock()
 
 	now := time.Now()
+	if len(hl.failuresPerIP)+len(hl.bannedUntil) >= 16384 {
+		if _, tracked := hl.failuresPerIP[ip]; !tracked {
+			return false
+		}
+	}
 	info, exists := hl.failuresPerIP[ip]
 	if !exists || now.Sub(info.firstFail) > failWindow {
 		info = failInfo{count: 1, firstFail: now}

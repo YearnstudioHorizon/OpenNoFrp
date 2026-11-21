@@ -18,6 +18,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -37,7 +40,26 @@ func Open(path string) (*Store, error) {
 	// _pragma 参数配置 WAL 模式（读不阻塞写，写也不阻塞读——这个低流量的
 	// 控制面数据库始终处于单写者场景）以及 busy timeout（使短暂的锁竞争会
 	// 重试，而不是立即报错）。
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", path)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	uriPath := filepath.ToSlash(abs)
+	if filepath.VolumeName(abs) != "" && !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsn := (&url.URL{Scheme: "file", Path: uriPath}).String() + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
@@ -174,7 +196,25 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 	if err := s.ensureIndexes(); err != nil {
 		return fmt.Errorf("store: ensure indexes: %w", err)
 	}
-	return nil
+	return s.ensureReservedPortGuards()
+}
+
+func (s *Store) ensureReservedPortGuards() error {
+	_, err := s.db.Exec(`
+ CREATE TRIGGER IF NOT EXISTS reject_reserved_rule_insert BEFORE INSERT ON rules
+ WHEN NEW.enabled = 1 AND EXISTS (
+  SELECT 1 FROM reserved_ports WHERE port BETWEEN NEW.remote_port AND max(NEW.remote_port, NEW.remote_port_end)
+ )
+ BEGIN SELECT RAISE(ABORT, 'reserved port'); END;
+ CREATE TRIGGER IF NOT EXISTS reject_reserved_rule_update BEFORE UPDATE OF enabled, remote_port, remote_port_end ON rules
+ WHEN NEW.enabled = 1 AND EXISTS (
+  SELECT 1 FROM reserved_ports WHERE port BETWEEN NEW.remote_port AND max(NEW.remote_port, NEW.remote_port_end)
+ )
+ BEGIN SELECT RAISE(ABORT, 'reserved port'); END;
+ UPDATE rules SET enabled = 0 WHERE enabled = 1 AND EXISTS (
+  SELECT 1 FROM reserved_ports WHERE port BETWEEN remote_port AND max(remote_port, remote_port_end)
+ );`)
+	return err
 }
 
 func (s *Store) ensureIndexes() error {
@@ -385,11 +425,23 @@ func (s *Store) SetAdminPasswordWithOld(ctx context.Context, oldPassword, newPas
 	if err != nil {
 		return false, fmt.Errorf("store: hash new password: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE admin SET password_hash = ? WHERE id = 1`, string(newHash))
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("store: update admin password: %w", err)
+		return false, err
 	}
-	return true, nil
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE admin SET password_hash = ? WHERE id = 1 AND password_hash = ?`, string(newHash), hash)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n != 1 {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM panel_sessions`); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // SetAdminPassword 修改管理员密码（供面板的“修改密码”页面使用）。
@@ -412,13 +464,22 @@ func (s *Store) SetAdminPassword(ctx context.Context, newPassword string) error 
 
 // CreatePanelSession 保存一个新的面板会话。
 func (s *Store) CreatePanelSession(ctx context.Context, tokenHash, csrfToken string, expiresAt time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO panel_sessions (token_hash, csrf_token, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		tokenHash, csrfToken, time.Now().Unix(), expiresAt.Unix())
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("store: create panel session: %w", err)
+		return err
 	}
-	return nil
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO panel_sessions (token_hash, csrf_token, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+		tokenHash, csrfToken, time.Now().Unix(), expiresAt.Unix()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM panel_sessions WHERE rowid IN (
+  SELECT rowid FROM panel_sessions ORDER BY rowid DESC LIMIT -1 OFFSET 16
+ )`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetPanelSession 返回会话的 CSRF 令牌与过期时间；不存在或已过期时 ok 为 false
@@ -611,33 +672,67 @@ func (s *Store) ConsumeRegisterToken(ctx context.Context, token, byClientID stri
 	}
 	defer tx.Rollback()
 
-	var expiresAt, consumedAt int64
-	err = tx.QueryRowContext(ctx,
-		`SELECT label, expires_at, consumed_at FROM register_tokens WHERE token = ?`, token,
-	).Scan(&label, &expiresAt, &consumedAt)
-	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("register token not found")
-	}
+	label, err = consumeRegisterToken(ctx, tx, token, byClientID)
 	if err != nil {
-		return "", fmt.Errorf("store: load register token: %w", err)
+		return "", err
 	}
-	if consumedAt != 0 {
-		return "", fmt.Errorf("register token already used")
+	return label, tx.Commit()
+}
+
+func consumeRegisterToken(ctx context.Context, tx *sql.Tx, token, clientID string) (string, error) {
+	var label string
+	now := time.Now().Unix()
+	err := tx.QueryRowContext(ctx, `UPDATE register_tokens
+  SET consumed_at = ?, consumed_by_client_id = ?
+  WHERE token = ? AND consumed_at = 0 AND expires_at > ?
+  RETURNING label`, now, clientID, token, now).Scan(&label)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("invalid or expired registration token")
 	}
-	if time.Now().Unix() > expiresAt {
-		return "", fmt.Errorf("register token expired")
+	return label, err
+}
+
+// RegisterClient checks the token before any expensive work and commits token
+// consumption and client creation together.
+func (s *Store) RegisterClient(ctx context.Context, token, name string) (string, string, error) {
+	if len(token) != 48 {
+		return "", "", fmt.Errorf("invalid registration token")
+	}
+	if _, err := hex.DecodeString(token); err != nil {
+		return "", "", fmt.Errorf("invalid registration token")
+	}
+	valid, err := s.CheckRegisterTokenValid(ctx, token)
+	if err != nil {
+		return "", "", err
+	}
+	if !valid {
+		return "", "", fmt.Errorf("invalid or expired registration token")
 	}
 
-	_, err = tx.ExecContext(ctx,
-		`UPDATE register_tokens SET consumed_at = ?, consumed_by_client_id = ? WHERE token = ?`,
-		time.Now().Unix(), byClientID, token)
+	id, err := randomHex(8)
 	if err != nil {
-		return "", fmt.Errorf("store: consume register token: %w", err)
+		return "", "", err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback()
+	label, err := consumeRegisterToken(ctx, tx, token, id)
+	if err != nil {
+		return "", "", err
+	}
+	if label != "" {
+		name = label
+	}
+	secret, err := insertClient(ctx, tx, id, name)
+	if err != nil {
+		return "", "", err
 	}
 	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("store: commit: %w", err)
+		return "", "", err
 	}
-	return label, nil
+	return id, secret, nil
 }
 
 // --- 迁移令牌 -------------------------------------------------------
@@ -658,6 +753,37 @@ func (s *Store) CreateMigrationToken(ctx context.Context, ttl time.Duration) (st
 		return "", fmt.Errorf("store: create migration token: %w", err)
 	}
 	return tok, nil
+}
+
+func (s *Store) CheckMigrationToken(ctx context.Context, token string) bool {
+	var valid int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM migration_tokens
+  WHERE token = ? AND consumed_at = 0 AND expires_at > ?`, token, time.Now().Unix()).Scan(&valid)
+	return err == nil
+}
+
+// SnapshotForMigration writes a consistent standalone SQLite database.
+func (s *Store) SnapshotForMigration(ctx context.Context, path string) error {
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", path); err != nil {
+		return err
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	// Previously issued migration tokens and browser sessions must not carry over.
+	if _, err := db.ExecContext(ctx, "DELETE FROM migration_tokens; DELETE FROM panel_sessions"); err != nil {
+		return err
+	}
+	var result string
+	if err := db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result); err != nil {
+		return err
+	}
+	if result != "ok" {
+		return fmt.Errorf("migration snapshot failed integrity check: %s", result)
+	}
+	return nil
 }
 
 // ConsumeMigrationToken 原子地校验并消费迁移令牌：不存在、已过期或已被
@@ -711,26 +837,38 @@ type Client struct {
 // Server 自身无法恢复丢失的 Client 密钥，这与面向运维者的行为一致：
 // “如果丢失，就重新执行注册流程以获取新身份”，而不是存储一个可恢复的
 // 共享密钥。
-func (s *Store) CreateClient(ctx context.Context, name string) (id, secret string, err error) {
-	id, err = randomHex(8)
+func (s *Store) CreateClient(ctx context.Context, name string) (string, string, error) {
+	id, err := randomHex(8)
 	if err != nil {
 		return "", "", err
 	}
-	secret, err = randomHex(24)
+	secret, err := insertClient(ctx, s.db, id, name)
 	if err != nil {
 		return "", "", err
+	}
+	return id, secret, nil
+}
+
+type clientInserter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertClient(ctx context.Context, db clientInserter, id, name string) (string, error) {
+	secret, err := randomHex(24)
+	if err != nil {
+		return "", err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
 	if err != nil {
-		return "", "", fmt.Errorf("store: hash client secret: %w", err)
+		return "", fmt.Errorf("store: hash client secret: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx,
+	_, err = db.ExecContext(ctx,
 		`INSERT INTO clients (id, name, secret_hash, created_at) VALUES (?, ?, ?, ?)`,
 		id, name, string(hash), time.Now().Unix())
 	if err != nil {
-		return "", "", fmt.Errorf("store: create client: %w", err)
+		return "", fmt.Errorf("store: create client: %w", err)
 	}
-	return id, secret, nil
+	return secret, nil
 }
 
 // VerifyClient 校验 HandshakeRequest 中提供的 ClientID/ClientSecret 对。
@@ -986,7 +1124,9 @@ func (s *Store) ListRulesForClient(ctx context.Context, clientID string) ([]Rule
 func (s *Store) ListEnabledRulesForClient(ctx context.Context, clientID string) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps, proxy_protocol, remote_port_end
-		 FROM rules WHERE client_id = ? AND enabled = 1 ORDER BY created_at`, clientID)
+		 FROM rules WHERE client_id = ? AND enabled = 1 AND NOT EXISTS (
+ SELECT 1 FROM reserved_ports WHERE port BETWEEN remote_port AND max(remote_port, remote_port_end)
+ ) ORDER BY created_at`, clientID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list enabled rules for client: %w", err)
 	}
@@ -1001,7 +1141,9 @@ func (s *Store) ListEnabledRulesForClient(ctx context.Context, clientID string) 
 func (s *Store) ListAllEnabledRules(ctx context.Context) ([]Rule, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, client_id, name, protocol, local_ip, local_port, remote_port, preserve_source_ip, enabled, created_at, domains, path_prefix, offline_page, ip_sources, trusted_proxies, tls_mode, tls_cert, tls_key, redirect_https, strip_prefix, host_rewrite, req_headers, resp_headers, basic_auth, ip_allow, not_found_page, guard_allow, guard_deny, max_conns_per_ip, conn_rate_per_min, bandwidth_kbps, proxy_protocol, remote_port_end
-		 FROM rules WHERE enabled = 1 ORDER BY created_at`)
+		 FROM rules WHERE enabled = 1 AND NOT EXISTS (
+ SELECT 1 FROM reserved_ports WHERE port BETWEEN remote_port AND max(remote_port, remote_port_end)
+ ) ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list all enabled rules: %w", err)
 	}
@@ -1204,13 +1346,21 @@ func (s *Store) ReservedPorts(ctx context.Context) (map[uint16]string, error) {
 // AddReservedPort 将一个端口标记为保留（永远不能通过规则转发）。
 // 幂等：重复添加同一端口只会更新其原因。
 func (s *Store) AddReservedPort(ctx context.Context, port uint16, reason string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO reserved_ports (port, reason) VALUES (?, ?) ON CONFLICT(port) DO UPDATE SET reason = excluded.reason`,
-		port, reason)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("store: add reserved port: %w", err)
+		return err
 	}
-	return nil
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO reserved_ports (port, reason) VALUES (?, ?) ON CONFLICT(port) DO UPDATE SET reason = excluded.reason`,
+		port, reason); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE rules SET enabled = 0 WHERE enabled = 1
+  AND ? BETWEEN remote_port AND max(remote_port, remote_port_end)`, port); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // RemoveReservedPort 取消某个端口的保留（面板运维者的手动覆盖，用于自动
