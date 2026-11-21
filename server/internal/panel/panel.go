@@ -54,7 +54,7 @@ type Panel struct {
 	Logger  *slog.Logger
 	OnRules OnRulesChanged
 
-	// BaseURL is the configured HTTPS origin used for onboarding and migration.
+	// BaseURL is the configured public HTTP or HTTPS panel origin.
 	BaseURL        string
 	TrustedProxies []*net.IPNet
 	// ControlHost/ControlPort 标识客户端将要连接的控制端点；会被渲染进
@@ -407,6 +407,8 @@ func friendlyMsg(s string) string {
 	switch s {
 	case "":
 		return ""
+	case "control endpoint unavailable":
+		return "请在服务端配置 control_host 或 public_base_url，并确认控制通道的 TLS 指纹可用。"
 	case "invalid credentials":
 		return "用户名或密码错误"
 	case "bad protocol":
@@ -521,7 +523,7 @@ func (p *Panel) workspaceData(r *http.Request, page string) map[string]any {
 	titles := map[string][2]string{
 		"overview":   {"工作空间概览", "查看连接状态，快速进入需要的功能。"},
 		"clients":    {"内网机器", "管理接入的机器，查看连接状态与转发规则。"},
-		"onboard":    {"接入新机器", "生成安装命令，连接你的第一台内网机器。"},
+		"onboard":    {"接入新机器", "生成一次性接入信息，连接你的内网机器。"},
 		"reserved":   {"保留端口", "保护 SSH、面板等服务使用的端口。"},
 		"api-tokens": {"API 令牌", "管理自动化程序的访问凭据。"},
 		"account":    {"账号设置", "管理管理员账号的登录密码。"},
@@ -573,8 +575,11 @@ func (p *Panel) handleWorkspace(page string) http.HandlerFunc {
 }
 
 func (p *Panel) handleCreateToken(w http.ResponseWriter, r *http.Request) {
-	base, ok := p.bootstrapURL(w, r)
-	if !ok {
+	base, _ := config.ParsePublicBaseURL(p.BaseURL)
+	host := p.controlHost(base)
+	fp := strings.TrimSpace(p.Fingerprint)
+	if host == "" || !validFingerprintRegex.MatchString(fp) {
+		p.redirectErr(w, r, "/onboard?err=control+endpoint+unavailable")
 		return
 	}
 	r.ParseForm()
@@ -588,9 +593,14 @@ func (p *Panel) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		p.redirectErr(w, r, "/onboard?err="+url.QueryEscape("internal error"))
 		return
 	}
-	cmd := bootstrapCommand(base.String() + "/install_client.sh?token=" + tok.Token)
 	data := p.workspaceData(r, "onboard")
-	data["NewToken"] = cmd
+	if base != nil && base.Scheme == "https" && p.secureRequest(r) {
+		data["NewToken"] = bootstrapCommand(base.String() + "/install_client.sh?token=" + tok.Token)
+	} else {
+		data["ClientConfig"] = true
+		data["NewToken"] = fmt.Sprintf("[server]\naddr = %q\nport = %d\ntoken = %q\nfingerprint = %q\n",
+			host, p.ControlPort, tok.Token, fp)
+	}
 	p.tmpl.ExecuteTemplate(w, "index.html", data)
 }
 
@@ -1282,8 +1292,8 @@ func (p *Panel) requestIP(r *http.Request) string {
 
 func (p *Panel) bootstrapURL(w http.ResponseWriter, r *http.Request) (*url.URL, bool) {
 	u, err := config.ParsePublicBaseURL(p.BaseURL)
-	if err != nil || !p.secureRequest(r) {
-		http.Error(w, "请配置 public_base_url 并通过受信任的 HTTPS 面板访问", http.StatusForbidden)
+	if err != nil || u.Scheme != "https" || !p.secureRequest(r) {
+		http.Error(w, "一键脚本和迁移下载需要 HTTPS，请配置 HTTPS public_base_url", http.StatusForbidden)
 		return nil, false
 	}
 	return u, true
@@ -1463,7 +1473,7 @@ UNIT
 
   launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load -w "$PLIST"
   echo "[opennofrp] client installed and started (launchd: org.opennofrp.client)"
-  echo "[opennofrp] note: macOS 版本暂不支持保留访问者源 IP，相关规则将以普通转发方式运行"
+  echo "[opennofrp] note: macOS 支持 IPv4 回环后端的 IPv4 来源地址保留，需启用默认 PF 锚点"
   echo "[opennofrp] watch: tail -f \"$APP_DIR/opennofrp-client.log\""
   exit 0
 fi

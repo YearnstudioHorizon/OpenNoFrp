@@ -25,13 +25,15 @@ gh attestation verify linux-server-install.sh --repo "$repo" \
   sudo bash linux-server-install.sh
 ```
 
-面板默认监听 `127.0.0.1:8080`。可以用 `ssh -L 8080:127.0.0.1:8080 user@server` 转发端口完成本地管理。安装新客户端、生成迁移命令时，设置明确的 HTTPS 外部地址 `public_base_url`，并使用证书有效的面板 HTTPS 或可信 HTTPS 反向代理。
+面板默认监听 `127.0.0.1:8080`，使用 HTTP。可在 `server.toml` 中设置 `panel_addr = "0.0.0.0"` 或指定内网 IP，供其他机器直接访问 HTTP 面板。已有 HTTP `public_base_url` 可以继续使用。设置成对的 `panel_tls_cert` 和 `panel_tls_key` 可启用 HTTPS，也可由可信反向代理终止 TLS。
 
 ### 2. 内网客户端 (Client) 接入
 
-通过配置好的 HTTPS 地址登录面板，点击 **「接入新机器」**。在内网机器上运行面板生成的命令。脚本在 root 执行前完整下载，通过发布证明校验客户端产物，并用一次性令牌和固定的服务端指纹完成注册。Linux 和 macOS 目标机器都需要 GitHub CLI。
+登录面板，点击 **「接入新机器」**。HTTP 面板生成包含一次性令牌和服务端指纹的 `client.toml`，供已安装的客户端使用。配置 `control_host` 或 `public_base_url` 指定客户端连接的主机。
 
-macOS 通过 launchd 托管。源 IP 保留依赖 Linux TPROXY，macOS 默认以普通模式转发。若后端根据源 IP 授权，客户端可设置 `[server] strict_source_ip = true`，让请求源 IP 保留的规则在无法保留时拒绝流量。
+配置 HTTPS `public_base_url` 并通过 HTTPS 访问时，面板会生成一键安装命令。脚本在 root 执行前完整下载，通过发布证明校验客户端产物，再用一次性令牌和固定指纹注册。Linux 和 macOS 目标机器都需要 GitHub CLI。
+
+macOS 通过 launchd 托管。开启规则的「保留来源 IP」后，运行在 root 权限下的 macOS 客户端可以通过 utun 和默认 PF 的 `com.apple/*` 锚点，将访客 IPv4 地址保留到 IPv4 回环后端。IPv6 访客、非回环目标或 PF 初始化失败时默认使用普通转发。若后端依赖源 IP 授权，可在客户端设置 `[server] strict_source_ip = true`，让要求保留来源 IP 的规则在无法保留时拒绝连接。
 
 ## 服务端一键迁移（点对点）
 
@@ -98,7 +100,7 @@ OpenNoFrp/
 
 ## 安全版本升级
 
-- 旧服务端在升级前将明文 `panel_addr` 改为 `127.0.0.1`，并移除任何 HTTP `public_base_url`。如果配置了 fCaptcha，将实例改为 HTTPS 或暂时切换到内置验证。直连 HTTPS 面板需设置成对的 PEM 证书和私钥。
+- 原有 HTTP 面板可按现有配置启动。如果配置了 fCaptcha，将实例改为 HTTPS 或暂时切换到内置验证。
 - 使用同机 HTTPS 反向代理时，保持后端监听回环，只把代理地址写入 `panel_trusted_proxies`，例如 `127.0.0.1/32`。代理必须覆盖 `X-Forwarded-Proto` 和 `X-Real-IP`。转发规则也要显式配置各自的可信代理 CIDR，才能采用代理提供的访客 IP。
 - 新装的 Linux Server 和 Client 使用带 `-server`、`-client` 后缀的独立安装、配置和状态目录。服务端安装器可以保留旧服务端配置和数据库。客户端安装器遇到旧的共享目录服务单元会停止升级。迁移此类主机时，先审核旧客户端单元及其程序的来源和所有权，尤其是 `ExecStopPost`，然后停用旧单元并恢复旧网络设置。安装新客户端后重新注册，或从可信备份将客户端配置与凭据复制到 `/etc/opennofrp-client`。卸载按组件清理。默认保留配置和数据。
 - Linux 客户端启用源 IP 保留前会先安装回环入口防护，并在磁盘记录策略路由、防火墙和 sysctl 改动。正常退出和 systemd 停止时使用同一套清理，启动时恢复上一次遗留的记录。默认使用策略路由表 `42141`、优先级 `12141` 与标记 `0x40000000`。
@@ -111,7 +113,7 @@ OpenNoFrp/
 - ✅ 端到端 TLS 通道加密与 SHA-256 证书指纹绑定 (Certificate Pinning)
 - ✅ 共享协议包、Client/Server 核心代码、TPROXY helper
 - ✅ netns-worker 宿主/bridge 容器自动感知
-- ✅ macOS 客户端（launchd 托管，普通转发版；源 IP 保留后续版本支持）
+- ✅ macOS 客户端（launchd 托管，支持保留 IPv4 来源地址）
 - ✅ 服务端一键点对点迁移（配置/数据库/证书打包，一次性令牌）
 - ✅ 单体 Go 二进制 + SQLite + 内嵌 Web 控制面板（带证书指纹展示与更新提示）
 - ✅ GitHub Actions 自动交叉编译多平台架构发布 (amd64 / arm64)
@@ -123,7 +125,7 @@ OpenNoFrp/
 - ✅ 规则级防护：IP 黑白名单、单 IP 并发与速率限制、规则带宽上限
 - ✅ 可选 Proxy Protocol v1/v2、UDP 源 IP 保留、端口段规则
 - ✅ 规则统计、Prometheus `/metrics`、REST API（`/api/v1/*`）与 API 令牌
-- ✅ 面板安全：CSRF 校验、回环或 HTTPS 面板、登录会话持久化
+- ✅ 面板安全：CSRF 校验、支持 HTTP 和 HTTPS 的管理面板、登录会话持久化
 - ✅ 客户端能力协商（旧版 Client 自动降级并在面板提示升级）
 - ✅ CI：gofmt / go vet / go test -race / govulncheck / 多架构交叉编译
 

@@ -5,7 +5,6 @@ package config
 
 import (
 	"fmt"
-	"net/netip"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -33,7 +32,7 @@ type ServerConfig struct {
 	PanelAddr string `toml:"panel_addr"` // 例如 "127.0.0.1"
 	PanelPort int    `toml:"panel_port"` // 例如 8080
 	// PanelTLSCert / PanelTLSKey 同时设置时，面板以 HTTPS 方式提供服务（PEM 文件路径）。
-	// 留空时只允许监听回环地址。
+	// 两项均留空时，在 panel_addr 上以 HTTP 提供面板。
 	PanelTLSCert string `toml:"panel_tls_cert"`
 	PanelTLSKey  string `toml:"panel_tls_key"`
 	// MetricsToken 非空时，面板的 /metrics 允许以 "Authorization: Bearer <token>"
@@ -54,7 +53,7 @@ type ServerConfig struct {
 	ClientBinDir string `toml:"client_bin_dir"` // 例如 "/opt/opennofrp-server/client-bins"
 
 	// PublicBaseURL 是外部用户访问面板所用的基础 URL（scheme://host[:port]）。
-	// 启用安装和迁移命令时必须设置 HTTPS 地址。
+	// 支持 HTTP 和 HTTPS。一键安装和迁移需要 HTTPS。
 	PublicBaseURL       string `toml:"public_base_url"`
 	PanelTrustedProxies string `toml:"panel_trusted_proxies"`
 	ControlHost         string `toml:"control_host"`
@@ -161,12 +160,6 @@ func validate(cfg *Config) error {
 	if (cfg.Server.PanelTLSCert == "") != (cfg.Server.PanelTLSKey == "") {
 		return fmt.Errorf("server.panel_tls_cert and server.panel_tls_key must be set together")
 	}
-	if cfg.Server.PanelTLSCert == "" {
-		addr, err := netip.ParseAddr(cfg.Server.PanelAddr)
-		if err != nil || !addr.IsLoopback() {
-			return fmt.Errorf("server.panel_addr must be a loopback IP when panel TLS is disabled")
-		}
-	}
 	if cfg.Server.PublicBaseURL != "" {
 		if _, err := ParsePublicBaseURL(cfg.Server.PublicBaseURL); err != nil {
 			return err
@@ -177,10 +170,10 @@ func validate(cfg *Config) error {
 
 func ParsePublicBaseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil ||
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil ||
 		(u.Path != "" && u.Path != "/") || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery ||
 		strings.ContainsAny(raw, "#\"'\\") {
-		return nil, fmt.Errorf("server.public_base_url must be an HTTPS origin")
+		return nil, fmt.Errorf("server.public_base_url must be an HTTP or HTTPS origin")
 	}
 	u.Path = ""
 	return u, nil
@@ -198,7 +191,7 @@ control_port = 17000
 
 panel_addr = "127.0.0.1"
 panel_port = 8080
-# Serve the admin panel over HTTPS (PEM file paths; both must be set together).
+# HTTP by default. Set both PEM paths to enable HTTPS on this listener.
 # panel_tls_cert = "/etc/opennofrp-server/panel.crt"
 # panel_tls_key = "/etc/opennofrp-server/panel.key"
 # Allow Prometheus to scrape /metrics with "Authorization: Bearer <token>".

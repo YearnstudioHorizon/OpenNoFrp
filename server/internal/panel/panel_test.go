@@ -148,6 +148,10 @@ func TestBootstrapRequiresTrustedHTTPS(t *testing.T) {
 	if !ok || base.Hostname() != "panel.example.test" {
 		t.Fatalf("trusted HTTPS request rejected or wrong origin: %v", base)
 	}
+	p.BaseURL = "http://panel.example.test"
+	if _, ok := p.bootstrapURL(httptest.NewRecorder(), req); ok {
+		t.Fatal("bootstrap accepted a configured plaintext origin")
+	}
 }
 
 func TestClientBootstrapScript(t *testing.T) {
@@ -175,5 +179,40 @@ func TestClientBootstrapScript(t *testing.T) {
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("bootstrap script has invalid shell syntax: %v: %s", err, output)
 		}
+	}
+}
+
+func TestHTTPPanelLoginAndManualOnboarding(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "panel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.CreateAdmin(ctx, "admin", "pass1234"); err != nil {
+		t.Fatal(err)
+	}
+	fp := "SHA256" + strings.Repeat(":AB", 32)
+	p := New(st, slog.Default(), nil, "http://panel.example.test:8080", "", 17000, fp, "")
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	cookie := login(t, srv)
+	if cookie.Secure {
+		t.Fatal("HTTP login issued a Secure cookie")
+	}
+	resp, page := do(t, "GET", srv.URL+"/onboard", cookie, nil)
+	match := csrfRe.FindStringSubmatch(page)
+	if resp.StatusCode != http.StatusOK || match == nil {
+		t.Fatal("onboarding page is unavailable over HTTP")
+	}
+	resp, page = do(t, "POST", srv.URL+"/register-token", cookie, url.Values{"csrf_token": {match[1]}})
+	for _, want := range []string{"[server]", "panel.example.test", "port = 17000", fp, "token = "} {
+		if resp.StatusCode != http.StatusOK || !strings.Contains(page, want) {
+			t.Fatalf("manual config is missing %q (HTTP %d)", want, resp.StatusCode)
+		}
+	}
+	if strings.Contains(page, "/install_client.sh?token=") {
+		t.Fatal("HTTP onboarding returned an executable bootstrap command")
 	}
 }

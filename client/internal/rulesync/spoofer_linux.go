@@ -24,8 +24,7 @@ import (
 // （即取值相同的 tproxy.DefaultFWMark）。
 const sharedFWMark = tproxy.DefaultFWMark
 
-// sourceIPSupported 报告本平台是否支持保留访问者源 IP。
-func sourceIPSupported() bool { return true }
+type platformSource struct{}
 
 // dialPreservingSource 在开启 preserve_source_ip 的规则上执行伪造源地址拨号。
 // 返回 (nil, nil) 表示应回退为普通转发；返回错误表示该连接应被丢弃。
